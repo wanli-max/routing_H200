@@ -657,6 +657,25 @@ class DataParallelPPOActor(BasePPOActor):
                     batch_metrics["actor/pg_loss"] = pg_loss.detach().item()
                     append_to_dict(metrics, batch_metrics)
 
+                    token_loss_weights = model_inputs.get("token_loss_weights")
+                    if token_loss_weights is not None:
+                        token_loss_weights = token_loss_weights.to(torch.float32)
+                        response_mask_float = response_mask.to(torch.float32)
+                        masked_weights = token_loss_weights * response_mask_float
+                        valid_weights = token_loss_weights[response_mask_float > 0]
+                        weight_mean = valid_weights.mean()
+                        weight_std = valid_weights.std() if valid_weights.numel() > 1 else valid_weights.new_zeros(())
+                        reasoning_weight_metrics = {
+                            "actor/reasoning_loss_weight_mean": weight_mean.detach().item(),
+                            "actor/reasoning_loss_weight_std": weight_std.detach().item(),
+                            "actor/reasoning_loss_weight_nonzero_frac": VF.masked_mean((token_loss_weights > 0).to(torch.float32), response_mask_float).detach().item(),
+                            "actor/reasoning_loss_weight_seq_sum_mean": masked_weights.sum(dim=-1).mean().detach().item(),
+                        }
+                        answer_chain_valid_mask = model_inputs.get("answer_chain_valid_mask")
+                        if answer_chain_valid_mask is not None:
+                            reasoning_weight_metrics["actor/reasoning_loss_weight_valid_seq_frac"] = answer_chain_valid_mask.to(torch.float32).mean().detach().item()
+                        append_to_dict(metrics, reasoning_weight_metrics)
+
                 grad_norm = self._optimizer_step()
                 append_to_dict(metrics, {"actor/grad_norm": grad_norm.detach().item()})
 
