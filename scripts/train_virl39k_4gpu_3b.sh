@@ -40,6 +40,7 @@ python3 -m verl.trainer.main \
     data.format_prompt=null \
     data.filter_overlong_prompts=false \
     data.max_prompt_length=8192 \
+    worker.rollout.max_num_batched_tokens=16384 \
     data.rollout_batch_size=128 \
     data.val_batch_size=128 \
     worker.actor.model.model_path="${MODEL_PATH}" \
