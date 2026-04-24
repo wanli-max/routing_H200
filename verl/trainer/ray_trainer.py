@@ -663,15 +663,10 @@ class RayPPOTrainer:
                         gamma=self.config.algorithm.gamma,
                         lam=self.config.algorithm.lam,
                     )
-                    batch = cache_answer_token_mask(
-                        data=batch,
-                        tokenizer=self.tokenizer,
-                        reward_function_path=self.config.worker.reward.reward_function,
-                    )
-
-                with timer("answer_chain", timing_raw):
-                    answer_chain_output = self.actor_rollout_ref_wg.compute_actor_answer_chain_weights(batch)
-                    batch = batch.union(answer_chain_output)
+                    # Reasoning token weights are temporarily detached from the
+                    # training mainline for debugging. Keep the implementation
+                    # available, but do not populate or consume the weight batch
+                    # in this run.
 
                 # update critic
                 if self.use_critic:
