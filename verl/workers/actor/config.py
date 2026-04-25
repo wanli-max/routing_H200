@@ -128,6 +128,10 @@ class ActorConfig:
     """temperature for positive tokens"""
     tau_negative: float = 1.05
     """temperature for negative tokens"""
+    reasoning_loss_weight_clip_min: float = 0.2
+    """lower bound for clipped reasoning token weights"""
+    reasoning_loss_weight_clip_max: float = 2.0
+    """upper bound for clipped reasoning token weights"""
     model: ModelConfig = field(default_factory=ModelConfig)
     optim: OptimConfig = field(default_factory=OptimConfig)
     fsdp: FSDPConfig = field(default_factory=FSDPConfig)
