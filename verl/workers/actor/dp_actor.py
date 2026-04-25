@@ -133,7 +133,7 @@ class DataParallelPPOActor(BasePPOActor):
         for hook_idx, layer_idx in enumerate(layer_indices):
             def make_hook(i):
                 def hook(module, args, output):
-                    captured[i] = args[0].detach().to("cpu", dtype=torch.bfloat16)
+                    captured[i] = args[0].detach()
                 return hook
             hooks.append(decoder_layers[layer_idx].register_forward_hook(make_hook(hook_idx)))
         return hooks, captured
@@ -141,18 +141,16 @@ class DataParallelPPOActor(BasePPOActor):
     def _extract_selected_projected_query_key_states(
         self,
         captured_hidden_states: dict,
-        device: torch.device,
         batch_size: int,
         seqlen: int,
         indices: Optional[torch.Tensor] = None,
         pad_size: int = 0,
-        detach_to_cpu: bool = True,
     ) -> torch.Tensor:
         decoder_layers = self._get_decoder_layers()
         layer_indices = self._resolve_answer_chain_layer_indices(len(decoder_layers))
         selected_layer_specs = []
         for idx, layer_index in enumerate(layer_indices):
-            hidden_state = captured_hidden_states[idx].to(device=device)
+            hidden_state = captured_hidden_states[idx]
             if self.config.padding_free:
                 if indices is None:
                     raise RuntimeError("Padding-free hidden-state caching requires unpadding indices.")
@@ -197,11 +195,9 @@ class DataParallelPPOActor(BasePPOActor):
                     key_states = key_states.repeat_interleave(num_heads // num_key_value_heads, dim=1)
 
                 projected_states = torch.stack(
-                    [query_states.to(cache_dtype), key_states.to(cache_dtype)],
+                    [query_states.to(torch.bfloat16), key_states.to(torch.bfloat16)],
                     dim=1,
                 )
-                if detach_to_cpu:
-                    projected_states = projected_states.detach().cpu()
             projected_layer_states.append(projected_states)
 
         return torch.stack(projected_layer_states, dim=1)
@@ -434,12 +430,10 @@ class DataParallelPPOActor(BasePPOActor):
             if cache_selected_hidden_states:
                 cached_hidden_states = self._extract_selected_projected_query_key_states(
                     captured_hidden_states=captured,
-                    device=input_ids_rmpad.device,
                     batch_size=batch_size,
                     seqlen=seqlen,
                     indices=indices,
                     pad_size=pad_size,
-                    detach_to_cpu=True,
                 )
         else:
             output = self.actor_module(
@@ -460,10 +454,8 @@ class DataParallelPPOActor(BasePPOActor):
             if cache_selected_hidden_states:
                 cached_hidden_states = self._extract_selected_projected_query_key_states(
                     captured_hidden_states=captured,
-                    device=input_ids.device,
                     batch_size=batch_size,
                     seqlen=seqlen,
-                    detach_to_cpu=True,
                 )
 
         return log_probs, cached_hidden_states
@@ -540,7 +532,7 @@ class DataParallelPPOActor(BasePPOActor):
                     attention_mask=model_inputs["attention_mask"],
                     response_mask=model_inputs["response_mask"],
                     answer_token_mask=model_inputs["answer_token_mask"],
-                    cached_projected_states=cached_hidden_states.to(device=model_inputs["input_ids"].device),
+                    cached_projected_states=cached_hidden_states,
                 )
                 token_loss_weight_batches.append(support.token_loss_weights)
                 answer_chain_valid_mask_batches.append(support.answer_chain_valid_mask)
