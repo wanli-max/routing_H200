@@ -8,6 +8,7 @@ import torch
 class BatchAnswerChainSupport:
     token_loss_weights: torch.Tensor
     answer_chain_valid_mask: torch.Tensor
+    visual_target: torch.Tensor
 
 
 def _compute_response_span(attention_mask: torch.Tensor, response_mask: torch.Tensor) -> tuple[int, int]:
@@ -46,6 +47,7 @@ def compute_answer_chain_support_from_local_rows(
     attention_mask: torch.Tensor,
     response_mask: torch.Tensor,
     answer_token_mask: torch.Tensor,
+    visual_token_mask: torch.Tensor | None = None,
     eps_norm: float = 1e-8,
     tiny_threshold: float = 1e-8,
 ) -> BatchAnswerChainSupport:
@@ -58,11 +60,18 @@ def compute_answer_chain_support_from_local_rows(
 
     batch_size = attention_mask.size(0)
     response_width = response_mask.size(1)
+    sequence_width = attention_mask.size(1)
     device = attention_mask.device
     dtype = torch.float32
 
+    if visual_token_mask is None:
+        visual_token_mask = torch.zeros_like(attention_mask, dtype=dtype)
+    elif visual_token_mask.shape != attention_mask.shape:
+        raise ValueError("visual_token_mask must match attention_mask shape.")
+
     token_loss_weights = torch.zeros((batch_size, response_width), device=device, dtype=dtype)
     answer_chain_valid_mask = torch.zeros(batch_size, device=device, dtype=dtype)
+    visual_target = torch.zeros((batch_size, sequence_width), device=device, dtype=dtype)
 
     for batch_index in range(batch_size):
         current_response_mask = response_mask[batch_index].to(torch.bool)
@@ -119,7 +128,13 @@ def compute_answer_chain_support_from_local_rows(
                 raw_reasoning_score / (score_sum + eps_norm)
             ) * reasoning_weight_scale
 
+        current_visual_mass = full_support[:response_end] * visual_token_mask[batch_index, :response_end].to(dtype)
+        visual_mass_sum = current_visual_mass.sum()
+        if visual_mass_sum > tiny_threshold:
+            visual_target[batch_index, :response_end] = current_visual_mass / (visual_mass_sum + eps_norm)
+
     return BatchAnswerChainSupport(
         token_loss_weights=token_loss_weights.detach(),
         answer_chain_valid_mask=answer_chain_valid_mask.detach(),
+        visual_target=visual_target.detach(),
     )

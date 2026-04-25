@@ -36,6 +36,7 @@ from ...utils.seqlen_balancing import prepare_dynamic_batch, restore_dynamic_bat
 from ...utils.ulysses import gather_outputs_and_unpad, ulysses_pad_and_slice_inputs
 from .base import BasePPOActor
 from .config import ActorConfig
+from .perception_head import is_perception_head_parameter
 
 
 try:
@@ -53,6 +54,7 @@ class DataParallelPPOActor(BasePPOActor):
         config: ActorConfig,
         actor_module: nn.Module,
         actor_optimizer: Optional[torch.optim.Optimizer] = None,
+        perception_optimizer: Optional[torch.optim.Optimizer] = None,
     ):
         """
         When optimizer is None, it is Reference Policy
@@ -62,6 +64,7 @@ class DataParallelPPOActor(BasePPOActor):
         self.world_size = int(os.getenv("WORLD_SIZE", "1"))
         self.actor_module = actor_module
         self.actor_optimizer = actor_optimizer
+        self.perception_optimizer = perception_optimizer
         if config.use_torch_compile:
             self.log_probs_from_logits = torch.compile(VF.log_probs_from_logits, dynamic=True)
         else:
@@ -108,6 +111,169 @@ class DataParallelPPOActor(BasePPOActor):
                 return nested_model.layers
 
         raise RuntimeError("Unable to locate decoder layers for answer-chain routing.")
+
+    def _get_model_config(self):
+        for candidate in (
+            self.actor_module,
+            getattr(self.actor_module, "_fsdp_wrapped_module", None),
+            getattr(self.actor_module, "model", None),
+        ):
+            if candidate is None:
+                continue
+            config = getattr(candidate, "config", None)
+            if config is not None:
+                return config
+        raise RuntimeError("Unable to resolve model config.")
+
+    def _get_perception_head(self):
+        for candidate in (
+            self.actor_module,
+            getattr(self.actor_module, "_fsdp_wrapped_module", None),
+            getattr(self.actor_module, "model", None),
+            getattr(getattr(self.actor_module, "_fsdp_wrapped_module", None), "model", None),
+        ):
+            if candidate is None:
+                continue
+            perception_head = getattr(candidate, "perception_head", None)
+            if perception_head is not None:
+                return perception_head
+        return None
+
+    def _extract_visual_token_outputs(
+        self,
+        outputs: Any,
+        batch_size: int,
+        seqlen: int,
+        indices: Optional[torch.Tensor] = None,
+        pad_size: int = 0,
+    ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+        visual_token_embeds = getattr(outputs, "visual_token_embeds", None)
+        visual_pos_masks = getattr(outputs, "visual_pos_masks", None)
+        if visual_token_embeds is None or visual_pos_masks is None:
+            return None, None
+
+        if self.config.padding_free:
+            if indices is None:
+                raise RuntimeError("Padding-free visual extraction requires unpadding indices.")
+            if self.config.ulysses_size > 1:
+                visual_token_embeds = gather_outputs_and_unpad(
+                    visual_token_embeds, gather_dim=1, unpad_dim=1, padding_size=pad_size
+                )
+                visual_pos_masks = gather_outputs_and_unpad(
+                    visual_pos_masks.to(dtype=visual_token_embeds.dtype),
+                    gather_dim=1,
+                    unpad_dim=1,
+                    padding_size=pad_size,
+                )
+            visual_token_embeds = visual_token_embeds.squeeze(0)
+            visual_pos_masks = visual_pos_masks.squeeze(0)
+            visual_token_embeds = pad_input(
+                hidden_states=visual_token_embeds, indices=indices, batch=batch_size, seqlen=seqlen
+            )
+            visual_pos_masks = pad_input(
+                hidden_states=visual_pos_masks.unsqueeze(-1), indices=indices, batch=batch_size, seqlen=seqlen
+            ).squeeze(-1)
+        else:
+            visual_pos_masks = visual_pos_masks.to(device=visual_token_embeds.device)
+
+        return visual_token_embeds, visual_pos_masks > 0
+
+    def _build_visual_token_mask(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+        model_config = self._get_model_config()
+        visual_mask = torch.zeros_like(input_ids, dtype=torch.bool)
+        for token_attr in ("image_token_id", "video_token_id"):
+            token_id = getattr(model_config, token_attr, None)
+            if token_id is not None:
+                visual_mask |= input_ids.eq(int(token_id))
+        visual_mask &= attention_mask.to(torch.bool)
+        return visual_mask.to(torch.float32)
+
+    def _compute_perception_success_mask(self, model_inputs: dict[str, torch.Tensor]) -> torch.Tensor:
+        success_threshold = float(getattr(self.config, "perception_success_threshold", 1.0))
+        if "sequence_accuracy" in model_inputs:
+            success_signal = model_inputs["sequence_accuracy"].to(torch.float32)
+        elif "token_level_scores" in model_inputs:
+            success_signal = model_inputs["token_level_scores"].sum(dim=-1).to(torch.float32)
+        else:
+            batch_size = model_inputs["responses"].size(0)
+            return torch.zeros(batch_size, device=model_inputs["responses"].device, dtype=torch.bool)
+        return success_signal >= success_threshold
+
+    def _compute_perception_loss(
+        self,
+        attention_mask: torch.Tensor,
+        response_mask: torch.Tensor,
+        answer_token_mask: torch.Tensor,
+        visual_target: torch.Tensor,
+        success_mask: torch.Tensor,
+        visual_token_embeds: Optional[torch.Tensor],
+        visual_pos_masks: Optional[torch.Tensor],
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, float]]:
+        metrics: dict[str, float] = {
+            "actor/perception_candidate_samples": float(visual_target.size(0)),
+            "actor/perception_successful_rollouts": float(success_mask.to(torch.float32).sum().item()),
+            "actor/perception_skip_unsuccessful": 0.0,
+            "actor/perception_skip_empty_answer_mask": 0.0,
+            "actor/perception_skip_no_visual_positions": 0.0,
+            "actor/perception_skip_zero_target": 0.0,
+            "actor/perception_skip_missing_head": 0.0,
+            "actor/perception_skip_missing_visual_token_embeds": 0.0,
+            "actor/perception_skip_missing_visual_pos_masks": 0.0,
+            "actor/perception_valid_samples": 0.0,
+        }
+        perception_head = self._get_perception_head()
+        batch_size = visual_target.size(0)
+        if perception_head is None:
+            metrics["actor/perception_skip_missing_head"] = float(batch_size)
+        if visual_token_embeds is None:
+            metrics["actor/perception_skip_missing_visual_token_embeds"] = float(batch_size)
+        if visual_pos_masks is None:
+            metrics["actor/perception_skip_missing_visual_pos_masks"] = float(batch_size)
+        if perception_head is None or visual_token_embeds is None or visual_pos_masks is None:
+            empty = visual_target.new_zeros(())
+            return empty, torch.zeros(batch_size, device=visual_target.device, dtype=torch.bool), metrics
+
+        visual_token_embeds = visual_token_embeds.to(torch.float32)
+        visual_pos_masks = visual_pos_masks.to(device=visual_token_embeds.device, dtype=torch.bool)
+        valid_mask = torch.zeros(batch_size, device=visual_target.device, dtype=torch.bool)
+        losses = []
+
+        for batch_index in range(batch_size):
+            if not bool(success_mask[batch_index].item()):
+                metrics["actor/perception_skip_unsuccessful"] += 1.0
+                continue
+
+            response_start, response_end = self._compute_response_span(
+                attention_mask[batch_index], response_mask[batch_index]
+            )
+            response_length = response_end - response_start
+            current_visual_target = visual_target[batch_index, :response_end].to(torch.float32)
+            current_answer_mask = answer_token_mask[batch_index, :response_length].to(torch.bool)
+            if current_answer_mask.sum().item() <= 0:
+                metrics["actor/perception_skip_empty_answer_mask"] += 1.0
+                continue
+
+            visual_positions = torch.nonzero(visual_pos_masks[batch_index, :response_end], as_tuple=False).flatten()
+            if visual_positions.numel() <= 0:
+                metrics["actor/perception_skip_no_visual_positions"] += 1.0
+                continue
+
+            current_target = current_visual_target[visual_positions]
+            target_sum = current_target.sum()
+            if target_sum <= 1e-8:
+                metrics["actor/perception_skip_zero_target"] += 1.0
+                continue
+
+            visual_states = visual_token_embeds[batch_index, visual_positions]
+            logits = perception_head(visual_states).to(torch.float32)
+            normalized_target = current_target / (target_sum + 1e-8)
+            losses.append(-(normalized_target * torch.log_softmax(logits, dim=-1)).sum())
+            valid_mask[batch_index] = True
+
+        metrics["actor/perception_valid_samples"] = float(valid_mask.to(torch.float32).sum().item())
+        if not losses:
+            return visual_target.new_zeros(()), valid_mask, metrics
+        return torch.stack(losses).mean(), valid_mask, metrics
 
     def _compute_response_span(self, attention_mask: torch.Tensor, response_mask: torch.Tensor) -> tuple[int, int]:
         sequence_width = attention_mask.size(0)
@@ -321,6 +487,7 @@ class DataParallelPPOActor(BasePPOActor):
         response_mask: torch.Tensor,
         answer_token_mask: torch.Tensor,
         cached_projected_states: torch.Tensor,
+        input_ids: Optional[torch.Tensor] = None,
     ):
         projected_layers = self._unpack_cached_projected_query_key_states(cached_projected_states)
         predecessor_indices, predecessor_weights = self._build_local_predecessor_rows(
@@ -328,12 +495,16 @@ class DataParallelPPOActor(BasePPOActor):
             attention_mask=attention_mask,
             response_mask=response_mask,
         )
+        visual_token_mask = None
+        if input_ids is not None:
+            visual_token_mask = self._build_visual_token_mask(input_ids=input_ids, attention_mask=attention_mask)
         return compute_answer_chain_support_from_local_rows(
             predecessor_indices=predecessor_indices,
             predecessor_weights=predecessor_weights,
             attention_mask=attention_mask,
             response_mask=response_mask,
             answer_token_mask=answer_token_mask,
+            visual_token_mask=visual_token_mask,
         )
 
     def _forward_micro_batch(
@@ -341,11 +512,14 @@ class DataParallelPPOActor(BasePPOActor):
         micro_batch: dict[str, torch.Tensor],
         temperature: float,
         cache_selected_hidden_states: bool = False,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        extract_visual: bool = False,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
         """
         Returns:
             log_probs: # (bs, response_len)
-            cached_hidden_states: optional projected q/k states cached on CPU for answer-chain routing
+            cached_hidden_states: optional projected q/k states for answer-chain routing
+            visual_token_embeds: optional visual token embeddings for perception loss
+            visual_pos_masks: optional bool mask of visual token positions
         """
         input_ids = micro_batch["input_ids"]
         batch_size, seqlen = input_ids.shape
@@ -364,6 +538,8 @@ class DataParallelPPOActor(BasePPOActor):
             multi_modal_inputs = {}
 
         cached_hidden_states = None
+        visual_token_embeds = None
+        visual_pos_masks = None
         hooks: list = []
         captured: dict = {}
         if cache_selected_hidden_states:
@@ -435,6 +611,14 @@ class DataParallelPPOActor(BasePPOActor):
                     indices=indices,
                     pad_size=pad_size,
                 )
+            if extract_visual:
+                visual_token_embeds, visual_pos_masks = self._extract_visual_token_outputs(
+                    outputs=output,
+                    batch_size=batch_size,
+                    seqlen=seqlen,
+                    indices=indices,
+                    pad_size=pad_size,
+                )
         else:
             output = self.actor_module(
                 input_ids=input_ids,
@@ -457,22 +641,51 @@ class DataParallelPPOActor(BasePPOActor):
                     batch_size=batch_size,
                     seqlen=seqlen,
                 )
+            if extract_visual:
+                visual_token_embeds, visual_pos_masks = self._extract_visual_token_outputs(
+                    outputs=output,
+                    batch_size=batch_size,
+                    seqlen=seqlen,
+                )
 
-        return log_probs, cached_hidden_states
+        return log_probs, cached_hidden_states, visual_token_embeds, visual_pos_masks
 
-    def _optimizer_step(self) -> torch.Tensor:
-        if isinstance(self.actor_module, FSDP):
+    def _optimizer_step(self) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        if isinstance(self.actor_module, FSDP) and self.perception_optimizer is None:
             grad_norm = self.actor_module.clip_grad_norm_(self.config.max_grad_norm)
         else:
-            grad_norm = nn.utils.clip_grad_norm_(self.actor_module.parameters(), max_norm=self.config.max_grad_norm)
+            actor_params = [p for group in self.actor_optimizer.param_groups for p in group["params"]]
+            grad_norm = nn.utils.clip_grad_norm_(actor_params, max_norm=self.config.max_grad_norm)
 
-        if not torch.isfinite(grad_norm):
-            print("Gradient norm is not finite. Skip update.")
+        perception_grad_norm = None
+        if self.perception_optimizer is not None:
+            perception_params = [p for group in self.perception_optimizer.param_groups for p in group["params"]]
+            if dist.is_initialized():
+                # perception head is not FSDP-sharded; manually sync gradients across ranks
+                sync_params = [p for p in perception_params if getattr(p, "_is_perception_head_param", False)]
+                for p in sync_params:
+                    if p.grad is not None:
+                        dist.all_reduce(p.grad, op=dist.ReduceOp.SUM)
+                        p.grad.div_(self.world_size)
+            perception_grad_norm = nn.utils.clip_grad_norm_(perception_params, max_norm=self.config.max_grad_norm)
+
+        actor_grad_finite = torch.isfinite(grad_norm)
+        perception_grad_finite = perception_grad_norm is None or torch.isfinite(perception_grad_norm)
+
+        if not actor_grad_finite:
+            print("Actor gradient norm is not finite. Skip update.")
+        elif not perception_grad_finite:
+            print("Perception gradient norm is not finite. Skip perception update.")
+            self.actor_optimizer.step()
         else:
             self.actor_optimizer.step()
+            if self.perception_optimizer is not None:
+                self.perception_optimizer.step()
 
         self.actor_optimizer.zero_grad()
-        return grad_norm
+        if self.perception_optimizer is not None:
+            self.perception_optimizer.zero_grad()
+        return grad_norm, perception_grad_norm
 
     @torch.no_grad()
     def compute_log_prob(self, data: DataProto) -> DataProto:
@@ -512,12 +725,13 @@ class DataParallelPPOActor(BasePPOActor):
         log_probs_lst = []
         token_loss_weight_batches = []
         answer_chain_valid_mask_batches = []
+        visual_target_batches = []
         if self.rank == 0:
             micro_batches = tqdm(micro_batches, desc="Compute log probs", position=1)
 
         for micro_batch in micro_batches:
             model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch}
-            log_probs, cached_hidden_states = self._forward_micro_batch(
+            log_probs, cached_hidden_states, _, _ = self._forward_micro_batch(
                 model_inputs,
                 temperature=temperature,
                 cache_selected_hidden_states=True,
@@ -533,9 +747,11 @@ class DataParallelPPOActor(BasePPOActor):
                     response_mask=model_inputs["response_mask"],
                     answer_token_mask=model_inputs["answer_token_mask"],
                     cached_projected_states=cached_hidden_states,
+                    input_ids=model_inputs.get("input_ids"),
                 )
                 token_loss_weight_batches.append(support.token_loss_weights)
                 answer_chain_valid_mask_batches.append(support.answer_chain_valid_mask)
+                visual_target_batches.append(support.visual_target)
 
         log_probs = torch.concat(log_probs_lst, dim=0)
 
@@ -546,21 +762,26 @@ class DataParallelPPOActor(BasePPOActor):
                 answer_chain_valid_mask = restore_dynamic_batch(
                     torch.concat(answer_chain_valid_mask_batches, dim=0), batch_idx_list
                 )
+                visual_target = restore_dynamic_batch(torch.concat(visual_target_batches, dim=0), batch_idx_list)
             else:
                 token_loss_weights = None
                 answer_chain_valid_mask = None
+                visual_target = None
         else:
             if token_loss_weight_batches:
                 token_loss_weights = torch.concat(token_loss_weight_batches, dim=0)
                 answer_chain_valid_mask = torch.concat(answer_chain_valid_mask_batches, dim=0)
+                visual_target = torch.concat(visual_target_batches, dim=0)
             else:
                 token_loss_weights = None
                 answer_chain_valid_mask = None
+                visual_target = None
 
         output_tensors = {"old_log_probs": log_probs}
         if token_loss_weights is not None and answer_chain_valid_mask is not None:
             output_tensors["token_loss_weights"] = token_loss_weights
             output_tensors["answer_chain_valid_mask"] = answer_chain_valid_mask
+            output_tensors["visual_target"] = visual_target
 
         return DataProto.from_dict(tensors=output_tensors)
 
@@ -573,6 +794,10 @@ class DataParallelPPOActor(BasePPOActor):
         optional_select_keys = [
             "token_loss_weights",
             "answer_chain_valid_mask",
+            "visual_target",
+            "answer_token_mask",
+            "sequence_accuracy",
+            "token_level_scores",
         ]
         select_keys.extend([key for key in optional_select_keys if key in data.batch])
         non_tensor_select_keys = ["multi_modal_inputs"]
@@ -606,8 +831,20 @@ class DataParallelPPOActor(BasePPOActor):
                     old_log_probs = model_inputs["old_log_probs"]
                     advantages = model_inputs["advantages"]
 
+                    use_perception_loss = (
+                        self.config.perception_loss_coef > 0
+                        and self.perception_optimizer is not None
+                        and "visual_target" in model_inputs
+                        and "answer_token_mask" in model_inputs
+                    )
+                    perception_success_mask = (
+                        self._compute_perception_success_mask(model_inputs) if use_perception_loss else None
+                    )
+
                     # all return: (bsz, response_length)
-                    log_probs, _ = self._forward_micro_batch(model_inputs, temperature=temperature)
+                    log_probs, _, visual_token_embeds, visual_pos_masks = self._forward_micro_batch(
+                        model_inputs, temperature=temperature, extract_visual=use_perception_loss
+                    )
 
                     pg_loss, pg_metrics = compute_policy_loss(
                         old_log_probs=old_log_probs,
@@ -644,6 +881,26 @@ class DataParallelPPOActor(BasePPOActor):
                     loss = loss * torch.sum(response_mask) * self.world_size / total_response_tokens
                     loss.backward()
 
+                    # Perception auxiliary loss — injected via gradient trick to avoid second FSDP backward
+                    if use_perception_loss and perception_success_mask is not None and visual_token_embeds is not None:
+                        vte_detach = visual_token_embeds.detach().requires_grad_(True)
+                        perception_loss, perception_valid_mask, perception_metrics = self._compute_perception_loss(
+                            attention_mask=model_inputs["attention_mask"],
+                            response_mask=model_inputs["response_mask"],
+                            answer_token_mask=model_inputs["answer_token_mask"],
+                            visual_target=model_inputs["visual_target"],
+                            success_mask=perception_success_mask,
+                            visual_token_embeds=vte_detach,
+                            visual_pos_masks=visual_pos_masks,
+                        )
+                        if perception_valid_mask.any():
+                            (self.config.perception_loss_coef * perception_loss).backward()
+                            # Inject perception gradient into main graph without a second backward pass
+                            (vte_detach.grad.detach() * visual_token_embeds).sum().backward()
+                        perception_metrics["actor/perception_loss"] = perception_loss.detach().item()
+                        perception_metrics["actor/perception_loss_coef"] = self.config.perception_loss_coef
+                        append_to_dict(metrics, perception_metrics)
+
                     batch_metrics = {f"actor/{k}": v for k, v in pg_metrics.items()}
                     batch_metrics["actor/pg_loss"] = pg_loss.detach().item()
                     append_to_dict(metrics, batch_metrics)
@@ -674,7 +931,9 @@ class DataParallelPPOActor(BasePPOActor):
                             reasoning_weight_metrics["actor/reasoning_loss_weight_valid_seq_frac"] = answer_chain_valid_mask.to(torch.float32).mean().detach().item()
                         append_to_dict(metrics, reasoning_weight_metrics)
 
-                grad_norm = self._optimizer_step()
+                grad_norm, perception_grad_norm = self._optimizer_step()
                 append_to_dict(metrics, {"actor/grad_norm": grad_norm.detach().item()})
+                if perception_grad_norm is not None:
+                    append_to_dict(metrics, {"actor/perception_grad_norm": perception_grad_norm.detach().item()})
 
         return metrics

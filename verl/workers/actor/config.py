@@ -132,6 +132,12 @@ class ActorConfig:
     """lower bound for clipped reasoning token weights"""
     reasoning_loss_weight_clip_max: float = 2.0
     """upper bound for clipped reasoning token weights"""
+    perception_loss_coef: float = 0.0
+    """auxiliary perception loss coefficient; 0 disables perception training"""
+    perception_lr: Optional[float] = None
+    """learning rate for visual tower + perception head; defaults to actor lr when None"""
+    perception_success_threshold: float = 1.0
+    """minimum sequence-level correctness score to apply perception loss"""
     model: ModelConfig = field(default_factory=ModelConfig)
     optim: OptimConfig = field(default_factory=OptimConfig)
     fsdp: FSDPConfig = field(default_factory=FSDPConfig)

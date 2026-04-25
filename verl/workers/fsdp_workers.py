@@ -15,6 +15,7 @@
 The main entry point to run the PPO algorithm
 """
 
+import os
 from contextlib import nullcontext
 from typing import Literal, Optional, Union, cast
 
@@ -62,6 +63,15 @@ from ..utils.torch_functional import (
     get_constant_schedule_with_warmup,
     get_cosine_schedule_with_warmup,
 )
+from .actor.perception_head import (
+    PerceptionEvidenceHead,
+    is_perception_head_parameter,
+    is_visual_tower_parameter,
+    mark_perception_head_parameters,
+    mark_visual_tower_parameters,
+    resolve_model_hidden_size,
+    resolve_visual_tower_module,
+)
 from .config import ActorConfig, CriticConfig, FSDPConfig, ModelConfig, OptimConfig, WorkerConfig
 from .rollout import vLLMRollout
 from .sharding_manager import FSDPVLLMShardingManager
@@ -98,6 +108,9 @@ class FSDPWorker(Worker):
 
         self._lora_rank = self.config.actor.model.lora.rank
         self._is_lora = self._lora_rank > 0
+
+        self.perception_optimizer = None
+        self.perception_lr_scheduler = None
 
         self._use_param_offload = False
         self._use_optimizer_offload = False
@@ -155,6 +168,58 @@ class FSDPWorker(Worker):
             and config.global_batch_size_per_device != config.micro_batch_size_per_device_for_update
         ):
             raise ValueError(f"{role} cannot use FSDP's CPU offload when gradient accumulation is enabled.")
+
+    def _build_optimizer_and_scheduler(
+        self,
+        parameters,
+        optim_config: OptimConfig,
+        lr_override: Optional[float] = None,
+    ):
+        parameters = [parameter for parameter in parameters if parameter.requires_grad]
+        if len(parameters) <= 0:
+            return None, None
+
+        learning_rate = optim_config.lr if lr_override is None else lr_override
+        if optim_config.strategy == "adamw":
+            optimizer = torch.optim.AdamW(
+                parameters,
+                lr=learning_rate,
+                betas=optim_config.betas,
+                weight_decay=optim_config.weight_decay,
+                fused=True,
+            )
+        elif optim_config.strategy == "adamw_bf16":
+            optimizer = AnyPrecisionAdamW(
+                parameters,
+                lr=learning_rate,
+                betas=optim_config.betas,
+                weight_decay=optim_config.weight_decay,
+            )
+        else:
+            raise NotImplementedError(f"Optimizer {optim_config.strategy} not supported.")
+
+        if optim_config.lr_warmup_steps is not None:
+            num_warmup_steps = optim_config.lr_warmup_steps
+        else:
+            num_warmup_steps = int(optim_config.lr_warmup_ratio * optim_config.training_steps)
+
+        if optim_config.lr_scheduler_type == "constant":
+            lr_scheduler = get_constant_schedule_with_warmup(optimizer=optimizer, num_warmup_steps=num_warmup_steps)
+        elif optim_config.lr_scheduler_type == "cosine":
+            total_steps = optim_config.training_steps
+            min_lr_ratio = optim_config.min_lr_ratio
+            num_cycles = 0.5
+            lr_scheduler = get_cosine_schedule_with_warmup(
+                optimizer=optimizer,
+                num_warmup_steps=num_warmup_steps,
+                num_training_steps=total_steps,
+                min_lr_ratio=min_lr_ratio,
+                num_cycles=num_cycles,
+            )
+        else:
+            raise NotImplementedError(f"LR scheduler type {optim_config.lr_scheduler_type} is not supported")
+
+        return optimizer, lr_scheduler
 
     def _build_model_optimizer(
         self,
@@ -272,6 +337,25 @@ class FSDPWorker(Worker):
             else:
                 self.print_rank0("No vision tower found.")
 
+        if role == "actor" and self.config.actor.perception_loss_coef > 0:
+            visual_tower = resolve_visual_tower_module(model)
+            if visual_tower is not None:
+                mark_visual_tower_parameters(visual_tower)
+                fsdp_config.use_orig_params = True
+
+        if role == "actor" and self.config.actor.perception_loss_coef > 0 and not hasattr(model, "perception_head"):
+            hidden_size = resolve_model_hidden_size(model.config)
+            perception_head = PerceptionEvidenceHead(hidden_size=hidden_size).to(torch_dtype)
+            mark_perception_head_parameters(perception_head)
+            model.add_module("perception_head", perception_head)
+            fsdp_config.use_orig_params = True
+
+        ignored_modules = None
+        if role == "actor" and self.config.actor.perception_loss_coef > 0:
+            perception_head_module = getattr(model, "perception_head", None)
+            if perception_head_module is not None:
+                ignored_modules = [perception_head_module]
+
         dist.barrier()
         print_model_size(model)
         print_gpu_memory_usage("After huggingface model init")
@@ -319,51 +403,58 @@ class FSDPWorker(Worker):
             forward_prefetch=False,
             use_orig_params=fsdp_config.use_orig_params,
             device_mesh=self.device_mesh,
+            ignored_modules=ignored_modules,
         )
+        if ignored_modules is not None:
+            ignored_device = torch.device("cuda", torch.cuda.current_device())
+            for ignored_module in ignored_modules:
+                ignored_module.to(device=ignored_device)
+                if sync_module_states:
+                    for parameter in ignored_module.parameters():
+                        dist.broadcast(parameter.data, src=0)
+                    for buffer in ignored_module.buffers():
+                        dist.broadcast(buffer.data, src=0)
         print_gpu_memory_usage("After FSDP module init")
 
         if role in ["actor", "critic"]:
             self.fsdp_module = fsdp_module
-            if optim_config.strategy == "adamw":
-                self.optimizer = torch.optim.AdamW(
-                    filter(lambda p: p.requires_grad, self.fsdp_module.parameters()),
-                    lr=optim_config.lr,
-                    betas=optim_config.betas,
-                    weight_decay=optim_config.weight_decay,
-                    fused=True,
-                )
-            elif optim_config.strategy == "adamw_bf16":
-                self.optimizer = AnyPrecisionAdamW(
-                    filter(lambda p: p.requires_grad, self.fsdp_module.parameters()),
-                    lr=optim_config.lr,
-                    betas=optim_config.betas,
-                    weight_decay=optim_config.weight_decay,
-                )
-            else:
-                raise NotImplementedError(f"Optimizer {optim_config.strategy} not supported.")
+            if role == "actor" and self.config.actor.perception_loss_coef > 0:
+                ignored_param_ids = set()
+                if ignored_modules is not None:
+                    for ignored_module in ignored_modules:
+                        ignored_param_ids.update(id(parameter) for parameter in ignored_module.parameters())
 
-            if optim_config.lr_warmup_steps is not None:
-                num_warmup_steps = optim_config.lr_warmup_steps
-            else:
-                num_warmup_steps = int(optim_config.lr_warmup_ratio * optim_config.training_steps)
-
-            if optim_config.lr_scheduler_type == "constant":
-                self.lr_scheduler = get_constant_schedule_with_warmup(
-                    optimizer=self.optimizer, num_warmup_steps=num_warmup_steps
+                actor_parameters = [
+                    parameter
+                    for parameter in self.fsdp_module.parameters()
+                    if parameter.requires_grad
+                    and not is_visual_tower_parameter(parameter)
+                    and not is_perception_head_parameter(parameter)
+                ]
+                perception_parameters = [
+                    parameter
+                    for parameter in self.fsdp_module.parameters()
+                    if parameter.requires_grad
+                    and (is_visual_tower_parameter(parameter) or is_perception_head_parameter(parameter))
+                    and id(parameter) not in ignored_param_ids
+                ]
+                if ignored_modules is not None:
+                    for ignored_module in ignored_modules:
+                        perception_parameters.extend(
+                            parameter for parameter in ignored_module.parameters() if parameter.requires_grad
+                        )
+                self.optimizer, self.lr_scheduler = self._build_optimizer_and_scheduler(
+                    actor_parameters, optim_config
                 )
-            elif optim_config.lr_scheduler_type == "cosine":
-                total_steps = optim_config.training_steps
-                min_lr_ratio = optim_config.min_lr_ratio
-                num_cycles = 0.5
-                self.lr_scheduler = get_cosine_schedule_with_warmup(
-                    optimizer=self.optimizer,
-                    num_warmup_steps=num_warmup_steps,
-                    num_training_steps=total_steps,
-                    min_lr_ratio=min_lr_ratio,
-                    num_cycles=num_cycles,
+                self.perception_optimizer, self.perception_lr_scheduler = self._build_optimizer_and_scheduler(
+                    perception_parameters,
+                    optim_config,
+                    lr_override=self.config.actor.perception_lr,
                 )
             else:
-                raise NotImplementedError(f"LR scheduler type {optim_config.lr_scheduler_type} is not supported")
+                self.optimizer, self.lr_scheduler = self._build_optimizer_and_scheduler(
+                    self.fsdp_module.parameters(), optim_config
+                )
             print_gpu_memory_usage("After optimizer init")
             if self._use_param_offload:
                 offload_fsdp_model(self.fsdp_module)
@@ -444,6 +535,7 @@ class FSDPWorker(Worker):
                 config=self.config.actor,
                 actor_module=self.fsdp_module,
                 actor_optimizer=self.optimizer,
+                perception_optimizer=self.perception_optimizer,
             )
 
         if self._has_critic:
@@ -482,6 +574,17 @@ class FSDPWorker(Worker):
             load_fsdp_model(self.fsdp_module)
 
         self.checkpoint_manager.save_checkpoint(path, save_model_only)
+        if self._has_actor and self.perception_optimizer is not None and not save_model_only:
+            perception_state_path = os.path.join(path, f"perception_state_rank_{self.rank}.pt")
+            torch.save(
+                {
+                    "perception_optimizer": self.perception_optimizer.state_dict(),
+                    "perception_lr_scheduler": None
+                    if self.perception_lr_scheduler is None
+                    else self.perception_lr_scheduler.state_dict(),
+                },
+                perception_state_path,
+            )
         dist.barrier()
         if self._use_param_offload:
             offload_fsdp_model(self.fsdp_module)
@@ -493,12 +596,24 @@ class FSDPWorker(Worker):
             load_fsdp_model(self.fsdp_module)
 
         self.checkpoint_manager.load_checkpoint(path)
+        if self._has_actor and self.perception_optimizer is not None:
+            perception_state_path = os.path.join(path, f"perception_state_rank_{self.rank}.pt")
+            if os.path.exists(perception_state_path):
+                perception_state = torch.load(perception_state_path, weights_only=False)
+                self.perception_optimizer.load_state_dict(perception_state["perception_optimizer"])
+                if (
+                    self.perception_lr_scheduler is not None
+                    and perception_state.get("perception_lr_scheduler") is not None
+                ):
+                    self.perception_lr_scheduler.load_state_dict(perception_state["perception_lr_scheduler"])
         dist.barrier()
         if self._use_param_offload:
             offload_fsdp_model(self.fsdp_module)
 
         if self._use_optimizer_offload:  # avoid OOM in resuming
             offload_fsdp_optimizer(self.optimizer)
+            if self.perception_optimizer is not None:
+                offload_fsdp_optimizer(self.perception_optimizer)
 
     def _process_multi_modal_inputs(self, data: DataProto):
         if "multi_modal_data" not in data.non_tensor_batch:
@@ -559,6 +674,8 @@ class FSDPWorker(Worker):
 
         if self._use_optimizer_offload:
             load_fsdp_optimizer(optimizer=self.optimizer)
+            if self.perception_optimizer is not None:
+                load_fsdp_optimizer(optimizer=self.perception_optimizer)
 
         with self.ulysses_sharding_manager:
             data = self.ulysses_sharding_manager.preprocess_data(data=data)
@@ -582,6 +699,9 @@ class FSDPWorker(Worker):
             lr = self.lr_scheduler.get_last_lr()[0]
             metrics["actor/lr"] = lr
             self.lr_scheduler.step()
+            if self.perception_lr_scheduler is not None:
+                metrics["actor/perception_lr"] = self.perception_lr_scheduler.get_last_lr()[0]
+                self.perception_lr_scheduler.step()
 
             # Metrics should be in non_tensor_batch instead of meta_info, as DataProto not concat meta_info
             output = DataProto(
@@ -596,6 +716,8 @@ class FSDPWorker(Worker):
 
         if self._use_optimizer_offload:
             offload_fsdp_optimizer(optimizer=self.optimizer)
+            if self.perception_optimizer is not None:
+                offload_fsdp_optimizer(optimizer=self.perception_optimizer)
 
         output = output.to("cpu")
         return output

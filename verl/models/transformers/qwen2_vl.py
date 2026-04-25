@@ -15,6 +15,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from dataclasses import dataclass
 from typing import Optional
 
 import torch
@@ -25,6 +26,18 @@ from transformers.models.qwen2_vl.modeling_qwen2_vl import (
     Qwen2VLModelOutputWithPast,
 )
 from transformers.models.qwen2_vl.processing_qwen2_vl import Qwen2VLProcessor
+
+
+@dataclass
+class EasyR1Qwen2VLModelOutputWithPast(Qwen2VLModelOutputWithPast):
+    visual_pos_masks: Optional[torch.BoolTensor] = None
+    visual_token_embeds: Optional[torch.FloatTensor] = None
+
+
+@dataclass
+class EasyR1Qwen2VLCausalLMOutputWithPast(Qwen2VLCausalLMOutputWithPast):
+    visual_pos_masks: Optional[torch.BoolTensor] = None
+    visual_token_embeds: Optional[torch.FloatTensor] = None
 
 
 def get_rope_index(
@@ -140,6 +153,9 @@ def _get_input_embeds(
     video_grid_thw: Optional[torch.LongTensor] = None,
 ):
     inputs_embeds = model.get_input_embeddings()(input_ids)
+    visual_token_embeds = torch.zeros_like(inputs_embeds)
+    visual_pos_masks = torch.zeros_like(input_ids, dtype=torch.bool)
+
     if pixel_values is not None:
         pixel_values = pixel_values.type(model.visual.dtype)
         image_embeds = model.visual(pixel_values, grid_thw=image_grid_thw)
@@ -156,6 +172,8 @@ def _get_input_embeds(
         image_mask = mask_expanded.to(inputs_embeds.device)
 
         image_embeds = image_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
+        visual_token_embeds = visual_token_embeds.masked_scatter(image_mask, image_embeds)
+        visual_pos_masks |= mask
         inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
 
     if pixel_values_videos is not None:
@@ -174,6 +192,8 @@ def _get_input_embeds(
         video_mask = mask_expanded.to(inputs_embeds.device)
 
         video_embeds = video_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
+        visual_token_embeds = visual_token_embeds.masked_scatter(video_mask, video_embeds)
+        visual_pos_masks |= mask
         inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embeds)
 
     if pixel_values is None and pixel_values_videos is None:
@@ -190,6 +210,8 @@ def _get_input_embeds(
     return {
         "inputs_embeds": inputs_embeds,
         "attention_mask": attention_mask,
+        "visual_pos_masks": visual_pos_masks,
+        "visual_token_embeds": visual_token_embeds,
     }
 
 
@@ -212,13 +234,17 @@ def qwen2_vl_base_forward(
     input_kwargs = _get_input_embeds(
         self, input_ids, attention_mask, pixel_values, pixel_values_videos, image_grid_thw, video_grid_thw
     )
+    visual_pos_masks = input_kwargs.pop("visual_pos_masks", None)
+    visual_token_embeds = input_kwargs.pop("visual_token_embeds", None)
     kwargs.update(input_kwargs)  # avoid lora module to have multiple keyword arguments
     outputs = self.language_model(input_ids=None, **kwargs)
-    return Qwen2VLModelOutputWithPast(
+    return EasyR1Qwen2VLModelOutputWithPast(
         last_hidden_state=outputs.last_hidden_state,
         past_key_values=getattr(outputs, "past_key_values", None),
         hidden_states=getattr(outputs, "hidden_states", None),
         attentions=getattr(outputs, "attentions", None),
+        visual_pos_masks=visual_pos_masks,
+        visual_token_embeds=visual_token_embeds,
     )
 
 
@@ -232,9 +258,11 @@ def qwen2_vl_model_forward(
     hidden_states = outputs.last_hidden_state
     logits = self.lm_head(hidden_states)
 
-    return Qwen2VLCausalLMOutputWithPast(
+    return EasyR1Qwen2VLCausalLMOutputWithPast(
         logits=logits,
         past_key_values=getattr(outputs, "past_key_values", None),
         hidden_states=getattr(outputs, "hidden_states", None),
         attentions=getattr(outputs, "attentions", None),
+        visual_pos_masks=getattr(outputs, "visual_pos_masks", None),
+        visual_token_embeds=getattr(outputs, "visual_token_embeds", None),
     )
