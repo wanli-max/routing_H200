@@ -417,14 +417,11 @@ def clip_token_loss_weights(
         return token_loss_weights
 
     weights = token_loss_weights.to(torch.float32)
-    positive_mask = (weights > 0) & response_mask.to(torch.bool)
-    if not torch.any(positive_mask):
-        return weights
-
+    response_mask_bool = response_mask.to(torch.bool)
     min_value = clip_min if clip_min is not None else float("-inf")
     max_value = clip_max if clip_max is not None else float("inf")
     clipped_weights = weights.clamp(min=min_value, max=max_value)
-    return torch.where(positive_mask, clipped_weights, weights)
+    return torch.where(response_mask_bool, clipped_weights, weights)
 
 
 def compute_policy_loss(
@@ -531,17 +528,13 @@ def compute_policy_loss(
     if token_loss_weights is None:
         final_pg_loss = average_loss(final_pg_loss, response_mask, mode=loss_avg_mode)
     else:
-        token_loss_weights = clip_token_loss_weights(
-            token_loss_weights=token_loss_weights,
-            response_mask=response_mask,
-            clip_min=token_loss_weight_clip_min,
-            clip_max=token_loss_weight_clip_max,
-        )
         response_mask_float = response_mask.to(final_pg_loss.dtype)
+
+        # Step 1+2: reasoning weights (pre-answer) already normalized in token_loss_weights;
+        # answer tokens carry 1.0, post-answer tokens carry 0.0 — structure built in answer_chain_support.
         effective_token_weights = token_loss_weights.to(final_pg_loss.dtype) * response_mask_float
 
-        # Keep the original PPO aggregation semantics: only reweight token losses.
-        # If answer-chain routing is invalid for a sequence, fall back to the unweighted PPO loss.
+        # Fallback: invalid answer-chain sequences use uniform weights (original PPO loss).
         if sequence_weight_mask is not None:
             valid_seq_mask = sequence_weight_mask.to(torch.bool).reshape(-1, 1)
             effective_token_weights = torch.where(valid_seq_mask, effective_token_weights, response_mask_float)
@@ -549,6 +542,16 @@ def compute_policy_loss(
             zero_weight_seq = effective_token_weights.sum(dim=-1, keepdim=True) <= 0
             effective_token_weights = torch.where(zero_weight_seq, response_mask_float, effective_token_weights)
 
+        # Step 3: clip after fallback — applies to ALL response tokens including zeros,
+        # so post-answer zero-weight tokens are raised to clip_min.
+        effective_token_weights = clip_token_loss_weights(
+            token_loss_weights=effective_token_weights,
+            response_mask=response_mask,
+            clip_min=token_loss_weight_clip_min,
+            clip_max=token_loss_weight_clip_max,
+        )
+
+        # Step 4: apply weights to loss.
         final_pg_loss = average_loss(final_pg_loss * effective_token_weights, response_mask, mode=loss_avg_mode)
     metrics = {k: VF.masked_mean(v, response_mask).detach().item() for k, v in metrics.items()}
     return final_pg_loss, metrics
