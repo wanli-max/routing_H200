@@ -17,7 +17,6 @@ Implement Actor
 
 import math
 import os
-from contextlib import ExitStack
 from collections import defaultdict
 from typing import Any, Optional
 
@@ -161,11 +160,8 @@ class DataParallelPPOActor(BasePPOActor):
             selected_layer_specs.append((decoder_layer, decoder_layer.self_attn, hidden_state))
 
         projected_layer_states = []
-        with ExitStack() as stack:
-            for decoder_layer, _, _ in selected_layer_specs:
-                stack.enter_context(FSDP.summon_full_params(decoder_layer, writeback=False, recurse=True))
-
-            for decoder_layer, attention_module, layer_hidden_states in selected_layer_specs:
+        for decoder_layer, attention_module, layer_hidden_states in selected_layer_specs:
+            with FSDP.summon_full_params(decoder_layer, writeback=False, recurse=True):
                 if hasattr(decoder_layer, "input_layernorm"):
                     layer_hidden_states = decoder_layer.input_layernorm(layer_hidden_states)
                 query_states = attention_module.q_proj(layer_hidden_states)
@@ -197,7 +193,7 @@ class DataParallelPPOActor(BasePPOActor):
                 )
                 if detach_to_cpu:
                     projected_states = projected_states.detach().cpu()
-                projected_layer_states.append(projected_states)
+            projected_layer_states.append(projected_states)
 
         return torch.stack(projected_layer_states, dim=1)
 
