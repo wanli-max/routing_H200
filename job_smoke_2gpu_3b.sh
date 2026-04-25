@@ -12,6 +12,13 @@ module load anaconda/2025
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate easyr1_virl39k_jh
 
+if [[ "${CUDA_VISIBLE_DEVICES:-}" == GPU-* ]] || [[ "${CUDA_VISIBLE_DEVICES:-}" == MIG-* ]]; then
+    export CUDA_VISIBLE_DEVICES=$(nvidia-smi --query-gpu=index,uuid --format=csv,noheader | \
+      awk -F', ' -v uuids="$CUDA_VISIBLE_DEVICES" \
+      'BEGIN{split(uuids,u,",")} {for(i in u) if($2==u[i]) printf "%s%s",(n++?",":""),$1}')
+    echo "[INFO] Converted CUDA_VISIBLE_DEVICES to: ${CUDA_VISIBLE_DEVICES}"
+fi
+
 cd /projects_vol/gp_boan/routing_H200
 git pull
 
