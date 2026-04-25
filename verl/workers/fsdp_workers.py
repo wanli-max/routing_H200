@@ -678,7 +678,7 @@ class FSDPWorker(Worker):
         with self.ulysses_sharding_manager, adapter_ctx:
             data = self.ulysses_sharding_manager.preprocess_data(data)
             output = self.ref_policy.compute_log_prob(data=data)
-            output = DataProto.from_dict(tensors={"ref_log_probs": output})
+            output = DataProto.from_dict(tensors={"ref_log_probs": output.batch["old_log_probs"]})
             output = self.ulysses_sharding_manager.postprocess_data(output)
 
         # https://pytorch.org/docs/stable/notes/fsdp.html#fsdp-notes
