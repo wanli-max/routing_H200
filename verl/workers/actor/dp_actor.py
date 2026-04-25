@@ -17,6 +17,7 @@ Implement Actor
 
 import math
 import os
+from contextlib import ExitStack
 from collections import defaultdict
 from typing import Any, Optional
 
@@ -175,33 +176,49 @@ class DataParallelPPOActor(BasePPOActor):
             raise RuntimeError("Cached hidden-state count does not match configured answer-chain layer count.")
 
         projected_layers = []
+        selected_layer_specs = []
         for cached_layer_index, layer_index in enumerate(layer_indices):
             decoder_layer = decoder_layers[layer_index]
-            attention_module = decoder_layer.self_attn
-            layer_hidden_states = selected_hidden_states[:, cached_layer_index]
-            with FSDP.summon_full_params(decoder_layer, writeback=False, recurse=True):
+            selected_layer_specs.append(
+                (
+                    cached_layer_index,
+                    decoder_layer,
+                    decoder_layer.self_attn,
+                    selected_hidden_states[:, cached_layer_index],
+                )
+            )
+
+        with ExitStack() as stack:
+            for _, decoder_layer, _, _ in selected_layer_specs:
+                stack.enter_context(FSDP.summon_full_params(decoder_layer, writeback=False, recurse=True))
+
+            for _, decoder_layer, attention_module, layer_hidden_states in selected_layer_specs:
                 if hasattr(decoder_layer, "input_layernorm"):
                     layer_hidden_states = decoder_layer.input_layernorm(layer_hidden_states)
                 query_states = attention_module.q_proj(layer_hidden_states)
                 key_states = attention_module.k_proj(layer_hidden_states)
 
-            num_heads = getattr(attention_module, "num_heads", None)
-            if num_heads is None:
-                raise RuntimeError("Answer-chain routing requires self_attn.num_heads.")
+                num_heads = getattr(attention_module, "num_heads", None)
+                if num_heads is None:
+                    raise RuntimeError("Answer-chain routing requires self_attn.num_heads.")
 
-            head_dim = query_states.size(-1) // num_heads
-            num_key_value_heads = getattr(attention_module, "num_key_value_heads", num_heads)
-            query_states = query_states.view(query_states.size(0), query_states.size(1), num_heads, head_dim).permute(0, 2, 1, 3)
-            key_states = key_states.view(
-                key_states.size(0), key_states.size(1), num_key_value_heads, head_dim
-            ).permute(0, 2, 1, 3)
+                head_dim = query_states.size(-1) // num_heads
+                num_key_value_heads = getattr(attention_module, "num_key_value_heads", num_heads)
+                query_states = query_states.view(
+                    query_states.size(0), query_states.size(1), num_heads, head_dim
+                ).permute(0, 2, 1, 3)
+                key_states = key_states.view(
+                    key_states.size(0), key_states.size(1), num_key_value_heads, head_dim
+                ).permute(0, 2, 1, 3)
 
-            if num_key_value_heads != num_heads:
-                if num_heads % num_key_value_heads != 0:
-                    raise RuntimeError("Answer-chain routing requires num_heads to be divisible by num_key_value_heads.")
-                key_states = key_states.repeat_interleave(num_heads // num_key_value_heads, dim=1)
+                if num_key_value_heads != num_heads:
+                    if num_heads % num_key_value_heads != 0:
+                        raise RuntimeError(
+                            "Answer-chain routing requires num_heads to be divisible by num_key_value_heads."
+                        )
+                    key_states = key_states.repeat_interleave(num_heads // num_key_value_heads, dim=1)
 
-            projected_layers.append((query_states, key_states, head_dim))
+                projected_layers.append((query_states, key_states, head_dim))
 
         return projected_layers
 
