@@ -726,6 +726,8 @@ class DataParallelPPOActor(BasePPOActor):
         token_loss_weight_batches = []
         answer_chain_valid_mask_batches = []
         visual_target_batches = []
+        # Run routing when reasoning weight is needed OR when perception loss needs visual_target
+        need_routing = self.config.use_answer_chain_routing or self.config.perception_loss_coef > 0
         if self.rank == 0:
             micro_batches = tqdm(micro_batches, desc="Compute log probs", position=1)
 
@@ -734,11 +736,11 @@ class DataParallelPPOActor(BasePPOActor):
             log_probs, cached_hidden_states, _, _ = self._forward_micro_batch(
                 model_inputs,
                 temperature=temperature,
-                cache_selected_hidden_states=self.config.use_answer_chain_routing,
+                cache_selected_hidden_states=need_routing,
             )
             log_probs_lst.append(log_probs)
             if (
-                self.config.use_answer_chain_routing
+                need_routing
                 and cached_hidden_states is not None
                 and "response_mask" in model_inputs
                 and "answer_token_mask" in model_inputs
@@ -750,8 +752,9 @@ class DataParallelPPOActor(BasePPOActor):
                     cached_projected_states=cached_hidden_states,
                     input_ids=model_inputs.get("input_ids"),
                 )
-                token_loss_weight_batches.append(support.token_loss_weights)
-                answer_chain_valid_mask_batches.append(support.answer_chain_valid_mask)
+                if self.config.use_answer_chain_routing:
+                    token_loss_weight_batches.append(support.token_loss_weights)
+                    answer_chain_valid_mask_batches.append(support.answer_chain_valid_mask)
                 visual_target_batches.append(support.visual_target)
 
         log_probs = torch.concat(log_probs_lst, dim=0)
@@ -763,25 +766,30 @@ class DataParallelPPOActor(BasePPOActor):
                 answer_chain_valid_mask = restore_dynamic_batch(
                     torch.concat(answer_chain_valid_mask_batches, dim=0), batch_idx_list
                 )
-                visual_target = restore_dynamic_batch(torch.concat(visual_target_batches, dim=0), batch_idx_list)
             else:
                 token_loss_weights = None
                 answer_chain_valid_mask = None
+            if visual_target_batches:
+                visual_target = restore_dynamic_batch(torch.concat(visual_target_batches, dim=0), batch_idx_list)
+            else:
                 visual_target = None
         else:
             if token_loss_weight_batches:
                 token_loss_weights = torch.concat(token_loss_weight_batches, dim=0)
                 answer_chain_valid_mask = torch.concat(answer_chain_valid_mask_batches, dim=0)
-                visual_target = torch.concat(visual_target_batches, dim=0)
             else:
                 token_loss_weights = None
                 answer_chain_valid_mask = None
+            if visual_target_batches:
+                visual_target = torch.concat(visual_target_batches, dim=0)
+            else:
                 visual_target = None
 
         output_tensors = {"old_log_probs": log_probs}
         if token_loss_weights is not None and answer_chain_valid_mask is not None:
             output_tensors["token_loss_weights"] = token_loss_weights
             output_tensors["answer_chain_valid_mask"] = answer_chain_valid_mask
+        if visual_target is not None:
             output_tensors["visual_target"] = visual_target
 
         return DataProto.from_dict(tensors=output_tensors)
