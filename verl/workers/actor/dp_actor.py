@@ -865,6 +865,37 @@ class DataParallelPPOActor(BasePPOActor):
                         model_inputs, temperature=temperature, extract_visual=use_perception_loss
                     )
 
+                    # --- Perception inject_grad: computed BEFORE the main backward ---
+                    # We evaluate perception loss on a detached copy of visual_token_embeds so
+                    # that the perception_head backward does NOT touch any FSDP parameters.
+                    # The resulting inject_grad is then added to the main loss so there is
+                    # EXACTLY ONE backward call through the FSDP model per micro-batch,
+                    # unconditionally — regardless of whether any perception sample is valid.
+                    # (A conditional second FSDP backward corrupts FSDP's internal all-gather
+                    # state and causes crashes on the save step.)
+                    import time as _pt
+                    inject_grad = None
+                    perception_computed_metrics: dict = {}
+                    if use_perception_loss and perception_success_mask is not None and visual_token_embeds is not None:
+                        vte_detach = visual_token_embeds.detach().requires_grad_(True)
+                        perception_loss, perception_valid_mask, perception_computed_metrics = self._compute_perception_loss(
+                            attention_mask=model_inputs["attention_mask"],
+                            response_mask=model_inputs["response_mask"],
+                            answer_token_mask=model_inputs["answer_token_mask"],
+                            visual_target=model_inputs["visual_target"],
+                            success_mask=perception_success_mask,
+                            visual_token_embeds=vte_detach,
+                            visual_pos_masks=visual_pos_masks,
+                        )
+                        print(f"[PROBE rank={self.rank}] {_pt.strftime('%H:%M:%S')} perception_valid_mask.any()={perception_valid_mask.any().item()}", flush=True)
+                        if perception_valid_mask.any():
+                            # backward through perception_head only — no FSDP params in graph
+                            (self.config.perception_loss_coef * perception_loss).backward()
+                            inject_grad = vte_detach.grad.detach()
+                            print(f"[PROBE rank={self.rank}] {_pt.strftime('%H:%M:%S')} inject_grad computed (non-None)", flush=True)
+                        perception_computed_metrics["actor/perception_loss"] = perception_loss.detach().item()
+                        perception_computed_metrics["actor/perception_loss_coef"] = self.config.perception_loss_coef
+
                     pg_loss, pg_metrics = compute_policy_loss(
                         old_log_probs=old_log_probs,
                         log_probs=log_probs,
@@ -898,31 +929,17 @@ class DataParallelPPOActor(BasePPOActor):
                         loss = pg_loss
 
                     loss = loss * torch.sum(response_mask) * self.world_size / total_response_tokens
+
+                    # Merge perception injection term into loss BEFORE backward so the entire
+                    # gradient (policy + perception) flows through a single FSDP backward pass.
+                    if inject_grad is not None:
+                        loss = loss + (inject_grad * visual_token_embeds).sum()
+
                     loss.backward()
 
-                    # Perception auxiliary loss — injected via gradient trick to avoid second FSDP backward
-                    if use_perception_loss and perception_success_mask is not None and visual_token_embeds is not None:
-                        vte_detach = visual_token_embeds.detach().requires_grad_(True)
-                        perception_loss, perception_valid_mask, perception_metrics = self._compute_perception_loss(
-                            attention_mask=model_inputs["attention_mask"],
-                            response_mask=model_inputs["response_mask"],
-                            answer_token_mask=model_inputs["answer_token_mask"],
-                            visual_target=model_inputs["visual_target"],
-                            success_mask=perception_success_mask,
-                            visual_token_embeds=vte_detach,
-                            visual_pos_masks=visual_pos_masks,
-                        )
-                        import time as _pt
-                        print(f"[PROBE rank={self.rank}] {_pt.strftime('%H:%M:%S')} perception_valid_mask.any()={perception_valid_mask.any().item()} — before perception backward", flush=True)
-                        if perception_valid_mask.any():
-                            (self.config.perception_loss_coef * perception_loss).backward()
-                            print(f"[PROBE rank={self.rank}] {_pt.strftime('%H:%M:%S')} after perception_loss.backward()", flush=True)
-                            # Inject perception gradient into main graph without a second backward pass
-                            (vte_detach.grad.detach() * visual_token_embeds).sum().backward()
-                            print(f"[PROBE rank={self.rank}] {_pt.strftime('%H:%M:%S')} after inject-grad.backward()", flush=True)
-                        perception_metrics["actor/perception_loss"] = perception_loss.detach().item()
-                        perception_metrics["actor/perception_loss_coef"] = self.config.perception_loss_coef
-                        append_to_dict(metrics, perception_metrics)
+                    # Record perception metrics (computed before backward above)
+                    if perception_computed_metrics:
+                        append_to_dict(metrics, perception_computed_metrics)
 
                     batch_metrics = {f"actor/{k}": v for k, v in pg_metrics.items()}
                     batch_metrics["actor/pg_loss"] = pg_loss.detach().item()
