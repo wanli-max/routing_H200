@@ -75,6 +75,7 @@ python3 -m verl.trainer.main \
     worker.actor.model.model_path="${MODEL_PATH}" \
     worker.actor.global_batch_size=4 \
     worker.rollout.tensor_parallel_size=1 \
+    worker.rollout.gpu_memory_utilization=0.35 \
     trainer.experiment_name="${EXPERIMENT_NAME}" \
     trainer.n_gpus_per_node=2 \
     trainer.logger='["file","tensorboard"]' \
