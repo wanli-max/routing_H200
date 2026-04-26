@@ -163,3 +163,5 @@ class RefConfig:
     dynamic_batching: bool = field(default=False, init=False)
     ulysses_size: int = field(default=1, init=False)
     use_torch_compile: bool = field(default=True, init=False)
+    use_answer_chain_routing: bool = field(default=False, init=False)
+    """ref policy never needs routing; always False"""
