@@ -165,3 +165,5 @@ class RefConfig:
     use_torch_compile: bool = field(default=True, init=False)
     use_answer_chain_routing: bool = field(default=False, init=False)
     """ref policy never needs routing; always False"""
+    perception_loss_coef: float = field(default=0.0, init=False)
+    """ref policy never uses perception loss; always 0"""
