@@ -124,6 +124,8 @@ class ActorConfig:
     """ulysses sequence parallel size"""
     use_torch_compile: bool = True
     """enable torch compile"""
+    use_answer_chain_routing: bool = True
+    """enable answer-chain routing to reweight reasoning token PPO loss; False = original EasyR1 behaviour"""
     tau_positive: float = 1.0
     """temperature for positive tokens"""
     tau_negative: float = 1.05

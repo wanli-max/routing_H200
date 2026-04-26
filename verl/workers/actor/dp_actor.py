@@ -734,11 +734,12 @@ class DataParallelPPOActor(BasePPOActor):
             log_probs, cached_hidden_states, _, _ = self._forward_micro_batch(
                 model_inputs,
                 temperature=temperature,
-                cache_selected_hidden_states=True,
+                cache_selected_hidden_states=self.config.use_answer_chain_routing,
             )
             log_probs_lst.append(log_probs)
             if (
-                cached_hidden_states is not None
+                self.config.use_answer_chain_routing
+                and cached_hidden_states is not None
                 and "response_mask" in model_inputs
                 and "answer_token_mask" in model_inputs
             ):
