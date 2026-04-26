@@ -658,6 +658,7 @@ class FSDPWorker(Worker):
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def update_actor(self, data: DataProto):
         assert self._has_actor
+        import time as _probe_time
 
         self._process_multi_modal_inputs(data)
         data = data.to(torch.cuda.current_device())
@@ -674,6 +675,10 @@ class FSDPWorker(Worker):
             data = self.ulysses_sharding_manager.preprocess_data(data=data)
             with Timer(name="update_policy", logger=None) as timer:
                 metrics = self.actor.update_policy(data=data)
+            print(
+                f"[PROBE rank={self.rank}] {_probe_time.strftime('%H:%M:%S')} update_actor: actor.update_policy returned",
+                flush=True,
+            )
 
             delta_time = timer.last
             global_num_tokens = data.meta_info["global_token_num"]
@@ -695,6 +700,10 @@ class FSDPWorker(Worker):
             if self.perception_lr_scheduler is not None:
                 metrics["actor/perception_lr"] = self.perception_lr_scheduler.get_last_lr()[0]
                 self.perception_lr_scheduler.step()
+            print(
+                f"[PROBE rank={self.rank}] {_probe_time.strftime('%H:%M:%S')} update_actor: schedulers stepped",
+                flush=True,
+            )
 
             # Metrics should be in non_tensor_batch instead of meta_info, as DataProto not concat meta_info
             output = DataProto(
@@ -703,16 +712,44 @@ class FSDPWorker(Worker):
                 }
             )
             # Metrics do not need post processing since their batch size is 1
+            print(
+                f"[PROBE rank={self.rank}] {_probe_time.strftime('%H:%M:%S')} update_actor: output DataProto built",
+                flush=True,
+            )
 
         if self._use_param_offload:
+            print(
+                f"[PROBE rank={self.rank}] {_probe_time.strftime('%H:%M:%S')} update_actor: before offload_fsdp_model",
+                flush=True,
+            )
             offload_fsdp_model(self.fsdp_module)
+            print(
+                f"[PROBE rank={self.rank}] {_probe_time.strftime('%H:%M:%S')} update_actor: after  offload_fsdp_model",
+                flush=True,
+            )
 
         if self._use_optimizer_offload:
+            print(
+                f"[PROBE rank={self.rank}] {_probe_time.strftime('%H:%M:%S')} update_actor: before offload_fsdp_optimizer",
+                flush=True,
+            )
             offload_fsdp_optimizer(optimizer=self.optimizer)
             if self.perception_optimizer is not None:
                 offload_fsdp_optimizer(optimizer=self.perception_optimizer)
+            print(
+                f"[PROBE rank={self.rank}] {_probe_time.strftime('%H:%M:%S')} update_actor: after  offload_fsdp_optimizer",
+                flush=True,
+            )
 
+        print(
+            f"[PROBE rank={self.rank}] {_probe_time.strftime('%H:%M:%S')} update_actor: before output.to(cpu)",
+            flush=True,
+        )
         output = output.to("cpu")
+        print(
+            f"[PROBE rank={self.rank}] {_probe_time.strftime('%H:%M:%S')} update_actor: after  output.to(cpu), returning",
+            flush=True,
+        )
         return output
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)

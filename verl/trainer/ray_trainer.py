@@ -19,6 +19,7 @@ This trainer supports model-agonistic model initialization with huggingface.
 import json
 import os
 import uuid
+import time
 from collections import defaultdict
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -681,9 +682,25 @@ class RayPPOTrainer:
                 # update actor
                 if self.config.trainer.critic_warmup <= self.global_step:
                     with timer("update_actor", timing_raw):
+                        print(
+                            f"[PROBE driver] {time.strftime('%H:%M:%S')} step={self.global_step} before actor_rollout_ref_wg.update_actor",
+                            flush=True,
+                        )
                         actor_output = self.actor_rollout_ref_wg.update_actor(batch)
+                        print(
+                            f"[PROBE driver] {time.strftime('%H:%M:%S')} step={self.global_step} after  actor_rollout_ref_wg.update_actor",
+                            flush=True,
+                        )
 
+                    print(
+                        f"[PROBE driver] {time.strftime('%H:%M:%S')} step={self.global_step} before reduce_metrics(actor_output)",
+                        flush=True,
+                    )
                     actor_metrics = reduce_metrics(actor_output.non_tensor_batch)
+                    print(
+                        f"[PROBE driver] {time.strftime('%H:%M:%S')} step={self.global_step} after  reduce_metrics(actor_output)",
+                        flush=True,
+                    )
                     metrics.update(actor_metrics)
 
                 # validate
@@ -693,13 +710,29 @@ class RayPPOTrainer:
                     and self.global_step % self.config.trainer.val_freq == 0
                 ):
                     with timer("validation", timing_raw):
+                        print(
+                            f"[PROBE driver] {time.strftime('%H:%M:%S')} step={self.global_step} before _validate",
+                            flush=True,
+                        )
                         val_metrics = self._validate()
+                        print(
+                            f"[PROBE driver] {time.strftime('%H:%M:%S')} step={self.global_step} after  _validate",
+                            flush=True,
+                        )
 
                     metrics.update(val_metrics)
 
                 if self.config.trainer.save_freq > 0 and self.global_step % self.config.trainer.save_freq == 0:
                     with timer("save_checkpoint", timing_raw):
+                        print(
+                            f"[PROBE driver] {time.strftime('%H:%M:%S')} step={self.global_step} before _save_checkpoint",
+                            flush=True,
+                        )
                         self._save_checkpoint()
+                        print(
+                            f"[PROBE driver] {time.strftime('%H:%M:%S')} step={self.global_step} after  _save_checkpoint",
+                            flush=True,
+                        )
 
             # collect metrics
             num_gpus = self.resource_pool_manager.get_num_gpus()
