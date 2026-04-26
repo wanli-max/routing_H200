@@ -113,11 +113,11 @@ class FSDPCheckpointManager(BaseCheckpointManager):
         return True
 
     def _model_state_dict_options(self) -> StateDictOptions:
-        # When perception training is enabled we also enable use_orig_params=True and
-        # split parameters across multiple optimizers. In this mode, requesting the
-        # local/sharded model state has proven crash-prone during checkpoint export,
-        # while full_state_dict=True is already stable in the rollout weight-sync path.
-        return StateDictOptions(cpu_offload=True, full_state_dict=bool(self._extra_optimizers))
+        # Checkpoint save always uses per-rank (sharded) model state — no all-gather.
+        # full_state_dict=True is only needed for vLLM weight sync where every rank
+        # needs the complete model; using it here triggers an all-gather that is
+        # unstable with use_orig_params=True on some PyTorch versions.
+        return StateDictOptions(cpu_offload=True)
 
     def load_checkpoint(self, path: Optional[str] = None):
         if path is None:
