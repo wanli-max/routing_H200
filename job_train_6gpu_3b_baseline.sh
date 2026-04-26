@@ -2,7 +2,7 @@
 #PBS -q gpu_as
 #PBS -P gs_ccds_boan
 #PBS -l select=1:ncpus=48:ngpus=6:mem=384gb
-#PBS -l walltime=36:00:00
+#PBS -l walltime=48:00:00
 #PBS -j oe
 #PBS -o /projects_vol/gp_boan/routing_H200/virl39k_6gpu_3b_baseline.log
 
