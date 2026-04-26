@@ -139,6 +139,8 @@ class FSDPVLLMShardingManager(BaseShardingManager):
         else:
             actor_weights = get_model_state_dict(self.module)
             actor_weights = self._rename_weight_keys(actor_weights, self.module._fsdp_wrapped_module)
+            # perception_head is not part of the vLLM model; exclude it from the sync
+            actor_weights = {k: v for k, v in actor_weights.items() if not k.startswith("perception_head.")}
 
         print_gpu_memory_usage("After gather model weights in sharding manager")
 
