@@ -25,8 +25,8 @@ from torch.distributed._tensor import DTensor
 from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
     get_model_state_dict,
-    get_state_dict,
-    set_state_dict,
+    set_model_state_dict,
+    set_optimizer_state_dict,
 )
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from transformers import PreTrainedModel, PreTrainedTokenizer, ProcessorMixin
@@ -49,10 +49,12 @@ class FSDPCheckpointManager(BaseCheckpointManager):
     - huggingface tokenizer and config for ckpt merge
 
     When extra_optimizers is provided (e.g. a separate perception optimizer that owns
-    visual-tower parameters), all optimizers are passed together to get_state_dict /
-    set_state_dict so that FSDP can map every wrapped parameter to its owning optimizer.
-    The saved optim_state_dict file will then contain a list of state dicts (one per
-    optimizer) instead of a single dict.
+    visual-tower parameters), we save each optimizer's native per-rank state_dict
+    directly instead of routing optimizer states through torch.distributed.checkpoint.
+    In our PyTorch version, get_state_dict/set_state_dict still delegate to
+    FSDP.optim_state_dict one optimizer at a time, which breaks under
+    use_orig_params=True when the wrapped module is split across multiple optimizers.
+    Model states still use the DCP/FSDP APIs so parameter shards remain restorable.
     """
 
     def __init__(
@@ -67,16 +69,47 @@ class FSDPCheckpointManager(BaseCheckpointManager):
         self._extra_optimizers: list = list(extra_optimizers) if extra_optimizers else []
 
     @property
-    def _opt_arg(self):
-        """Return a single optimizer or a list, depending on whether extras exist.
+    def _optimizers(self) -> list[torch.optim.Optimizer]:
+        return [self.optimizer] + self._extra_optimizers
 
-        Passing a list to get_state_dict / set_state_dict makes FSDP aware of all
-        parameter-to-optimizer assignments, which is required when model parameters
-        are split across multiple optimizers (e.g. actor vs. perception).
-        """
-        if self._extra_optimizers:
-            return [self.optimizer] + self._extra_optimizers
-        return self.optimizer
+    @staticmethod
+    def _to_cpu(value):
+        if torch.is_tensor(value):
+            return value.detach().cpu()
+        if isinstance(value, dict):
+            return {key: FSDPCheckpointManager._to_cpu(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [FSDPCheckpointManager._to_cpu(item) for item in value]
+        if isinstance(value, tuple):
+            return tuple(FSDPCheckpointManager._to_cpu(item) for item in value)
+        return value
+
+    @staticmethod
+    def _looks_like_native_optimizer_state_dict(value) -> bool:
+        if not isinstance(value, dict):
+            return False
+        if "state" not in value or "param_groups" not in value:
+            return False
+        param_groups = value.get("param_groups")
+        if not isinstance(param_groups, list) or len(param_groups) == 0:
+            return True
+        params = param_groups[0].get("params", [])
+        return not params or isinstance(params[0], int)
+
+    def _load_native_optimizer_state_dicts(self, payload) -> bool:
+        if self._looks_like_native_optimizer_state_dict(payload):
+            payload = [payload]
+        elif not isinstance(payload, list) or not all(self._looks_like_native_optimizer_state_dict(item) for item in payload):
+            return False
+
+        optimizers = self._optimizers
+        if len(payload) != len(optimizers):
+            raise RuntimeError(
+                f"Checkpoint contains {len(payload)} optimizer state dict(s), but current run has {len(optimizers)} optimizer(s)."
+            )
+        for optimizer, state_dict in zip(optimizers, payload):
+            optimizer.load_state_dict(state_dict)
+        return True
 
     def load_checkpoint(self, path: Optional[str] = None):
         if path is None:
@@ -94,13 +127,11 @@ class FSDPCheckpointManager(BaseCheckpointManager):
         extra_state_dict = torch.load(extra_path, weights_only=False)
 
         state_dict_options = StateDictOptions(cpu_offload=True)
-        set_state_dict(
-            model=self.model,
-            optimizers=self._opt_arg,
-            model_state_dict=model_state_dict,
-            optim_state_dict=optim_state_dict,
-            options=state_dict_options,
-        )
+        set_model_state_dict(self.model, model_state_dict, options=state_dict_options)
+        if not self._load_native_optimizer_state_dicts(optim_state_dict):
+            # Backward compatibility for legacy single-optimizer checkpoints that were
+            # saved through torch.distributed.checkpoint before perception loss existed.
+            set_optimizer_state_dict(self.model, self.optimizer, optim_state_dict, options=state_dict_options)
         self.lr_scheduler.load_state_dict(extra_state_dict["lr_scheduler"])
 
         # recover random state
@@ -122,7 +153,10 @@ class FSDPCheckpointManager(BaseCheckpointManager):
             print(f"[rank-{self.rank}]: Saving model to {os.path.abspath(model_path)}.")
             torch.save(model_state_dict, model_path)
         else:
-            model_state_dict, optim_state_dict = get_state_dict(self.model, self._opt_arg, options=state_dict_options)
+            model_state_dict = get_model_state_dict(self.model, options=state_dict_options)
+            optim_state_dict = [self._to_cpu(optimizer.state_dict()) for optimizer in self._optimizers]
+            if len(optim_state_dict) == 1:
+                optim_state_dict = optim_state_dict[0]
             extra_state_dict = {
                 "lr_scheduler": self.lr_scheduler.state_dict(),
                 "rng": self.get_rng_state(),
