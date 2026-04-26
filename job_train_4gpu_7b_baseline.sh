@@ -54,6 +54,7 @@ python3 -m verl.trainer.main \
     worker.actor.global_batch_size=512 \
     worker.actor.micro_batch_size_per_device_for_update=1 \
     worker.actor.micro_batch_size_per_device_for_experience=1 \
+    worker.actor.fsdp.enable_cpu_offload=true \
     worker.actor.use_answer_chain_routing=false \
     worker.actor.perception_loss_coef=0.0 \
     trainer.total_epochs=2 \
