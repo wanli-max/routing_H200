@@ -571,18 +571,51 @@ class FSDPWorker(Worker):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def save_checkpoint(self, path: str, save_model_only: bool = False):
         assert self._has_actor or self._has_critic
+        import time as _probe_time
         if self._use_param_offload:
+            print(
+                f"[PROBE rank={self.rank}] {_probe_time.strftime('%H:%M:%S')} save_checkpoint: before load_fsdp_model",
+                flush=True,
+            )
             load_fsdp_model(self.fsdp_module)
+            print(
+                f"[PROBE rank={self.rank}] {_probe_time.strftime('%H:%M:%S')} save_checkpoint: after  load_fsdp_model",
+                flush=True,
+            )
 
+        print(
+            f"[PROBE rank={self.rank}] {_probe_time.strftime('%H:%M:%S')} save_checkpoint: before checkpoint_manager.save_checkpoint",
+            flush=True,
+        )
         self.checkpoint_manager.save_checkpoint(path, save_model_only)
+        print(
+            f"[PROBE rank={self.rank}] {_probe_time.strftime('%H:%M:%S')} save_checkpoint: after  checkpoint_manager.save_checkpoint",
+            flush=True,
+        )
         # perception_optimizer state is saved inside checkpoint_manager (via extra_optimizers).
         # Only the perception lr_scheduler needs separate saving as it is not covered there.
         if self._has_actor and self.perception_lr_scheduler is not None and not save_model_only:
             perception_sched_path = os.path.join(path, f"perception_lr_sched_rank_{self.rank}.pt")
+            print(
+                f"[PROBE rank={self.rank}] {_probe_time.strftime('%H:%M:%S')} save_checkpoint: before torch.save(perception_lr_scheduler)",
+                flush=True,
+            )
             torch.save(self.perception_lr_scheduler.state_dict(), perception_sched_path)
+            print(
+                f"[PROBE rank={self.rank}] {_probe_time.strftime('%H:%M:%S')} save_checkpoint: after  torch.save(perception_lr_scheduler)",
+                flush=True,
+            )
         dist.barrier()
         if self._use_param_offload:
+            print(
+                f"[PROBE rank={self.rank}] {_probe_time.strftime('%H:%M:%S')} save_checkpoint: before offload_fsdp_model",
+                flush=True,
+            )
             offload_fsdp_model(self.fsdp_module)
+            print(
+                f"[PROBE rank={self.rank}] {_probe_time.strftime('%H:%M:%S')} save_checkpoint: after  offload_fsdp_model",
+                flush=True,
+            )
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def load_checkpoint(self, path: str):
