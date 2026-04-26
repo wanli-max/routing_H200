@@ -47,6 +47,12 @@ class FSDPCheckpointManager(BaseCheckpointManager):
     - sharded model states and optimizer states
     - full lr_scheduler states
     - huggingface tokenizer and config for ckpt merge
+
+    When extra_optimizers is provided (e.g. a separate perception optimizer that owns
+    visual-tower parameters), all optimizers are passed together to get_state_dict /
+    set_state_dict so that FSDP can map every wrapped parameter to its owning optimizer.
+    The saved optim_state_dict file will then contain a list of state dicts (one per
+    optimizer) instead of a single dict.
     """
 
     def __init__(
@@ -55,8 +61,22 @@ class FSDPCheckpointManager(BaseCheckpointManager):
         optimizer: torch.optim.Optimizer,
         lr_scheduler: torch.optim.lr_scheduler.LRScheduler,
         processing_class: Union[PreTrainedTokenizer, ProcessorMixin],
+        extra_optimizers: Optional[list] = None,
     ):
         super().__init__(model, optimizer, lr_scheduler, processing_class)
+        self._extra_optimizers: list = list(extra_optimizers) if extra_optimizers else []
+
+    @property
+    def _opt_arg(self):
+        """Return a single optimizer or a list, depending on whether extras exist.
+
+        Passing a list to get_state_dict / set_state_dict makes FSDP aware of all
+        parameter-to-optimizer assignments, which is required when model parameters
+        are split across multiple optimizers (e.g. actor vs. perception).
+        """
+        if self._extra_optimizers:
+            return [self.optimizer] + self._extra_optimizers
+        return self.optimizer
 
     def load_checkpoint(self, path: Optional[str] = None):
         if path is None:
@@ -76,7 +96,7 @@ class FSDPCheckpointManager(BaseCheckpointManager):
         state_dict_options = StateDictOptions(cpu_offload=True)
         set_state_dict(
             model=self.model,
-            optimizers=self.optimizer,
+            optimizers=self._opt_arg,
             model_state_dict=model_state_dict,
             optim_state_dict=optim_state_dict,
             options=state_dict_options,
@@ -102,7 +122,7 @@ class FSDPCheckpointManager(BaseCheckpointManager):
             print(f"[rank-{self.rank}]: Saving model to {os.path.abspath(model_path)}.")
             torch.save(model_state_dict, model_path)
         else:
-            model_state_dict, optim_state_dict = get_state_dict(self.model, self.optimizer, options=state_dict_options)
+            model_state_dict, optim_state_dict = get_state_dict(self.model, self._opt_arg, options=state_dict_options)
             extra_state_dict = {
                 "lr_scheduler": self.lr_scheduler.state_dict(),
                 "rng": self.get_rng_state(),
