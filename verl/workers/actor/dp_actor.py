@@ -651,6 +651,8 @@ class DataParallelPPOActor(BasePPOActor):
         return log_probs, cached_hidden_states, visual_token_embeds, visual_pos_masks
 
     def _optimizer_step(self) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        import time as _ot
+        print(f"[PROBE rank={self.rank}] {_ot.strftime('%H:%M:%S')} entering _optimizer_step", flush=True)
         if isinstance(self.actor_module, FSDP) and self.perception_optimizer is None:
             grad_norm = self.actor_module.clip_grad_norm_(self.config.max_grad_norm)
         else:
@@ -666,13 +668,17 @@ class DataParallelPPOActor(BasePPOActor):
                 # Ranks that had no valid perception samples contribute a zero gradient so
                 # that the all_reduce is balanced and no deadlock occurs.
                 sync_params = [p for p in perception_params if getattr(p, "_is_perception_head_param", False)]
+                import time as _at
+                print(f"[PROBE rank={self.rank}] {_at.strftime('%H:%M:%S')} before perception-head grad all_reduce ({len(sync_params)} params)", flush=True)
                 for p in sync_params:
                     if p.grad is None:
                         p.grad = torch.zeros_like(p)  # contribute zero; keeps collective balanced
                     dist.all_reduce(p.grad, op=dist.ReduceOp.SUM)
                     p.grad.div_(self.world_size)
+                print(f"[PROBE rank={self.rank}] {_at.strftime('%H:%M:%S')} after  perception-head grad all_reduce", flush=True)
             perception_grad_norm = nn.utils.clip_grad_norm_(perception_params, max_norm=self.config.max_grad_norm)
 
+        print(f"[PROBE rank={self.rank}] {_ot.strftime('%H:%M:%S')} _optimizer_step: grad clip done, calling optimizer.step()", flush=True)
         actor_grad_finite = torch.isfinite(grad_norm)
         perception_grad_finite = perception_grad_norm is None or torch.isfinite(perception_grad_norm)
 
@@ -906,10 +912,14 @@ class DataParallelPPOActor(BasePPOActor):
                             visual_token_embeds=vte_detach,
                             visual_pos_masks=visual_pos_masks,
                         )
+                        import time as _pt
+                        print(f"[PROBE rank={self.rank}] {_pt.strftime('%H:%M:%S')} perception_valid_mask.any()={perception_valid_mask.any().item()} — before perception backward", flush=True)
                         if perception_valid_mask.any():
                             (self.config.perception_loss_coef * perception_loss).backward()
+                            print(f"[PROBE rank={self.rank}] {_pt.strftime('%H:%M:%S')} after perception_loss.backward()", flush=True)
                             # Inject perception gradient into main graph without a second backward pass
                             (vte_detach.grad.detach() * visual_token_embeds).sum().backward()
+                            print(f"[PROBE rank={self.rank}] {_pt.strftime('%H:%M:%S')} after inject-grad.backward()", flush=True)
                         perception_metrics["actor/perception_loss"] = perception_loss.detach().item()
                         perception_metrics["actor/perception_loss_coef"] = self.config.perception_loss_coef
                         append_to_dict(metrics, perception_metrics)
