@@ -113,10 +113,13 @@ class FSDPCheckpointManager(BaseCheckpointManager):
         return True
 
     def _model_state_dict_options(self) -> StateDictOptions:
-        # Checkpoint save always uses per-rank (sharded) model state — no all-gather.
-        # full_state_dict=True is only needed for vLLM weight sync where every rank
-        # needs the complete model; using it here triggers an all-gather that is
-        # unstable with use_orig_params=True on some PyTorch versions.
+        # The perception path enables use_orig_params=True. We have now verified that
+        # the checkpoint crash happens inside get_model_state_dict(cpu_offload=True),
+        # while the vLLM sync path successfully uses full_state_dict=True without
+        # cpu_offload on the same worker. Mirror that path here for perception runs
+        # and move tensors to CPU manually before torch.save.
+        if self._extra_optimizers:
+            return StateDictOptions(full_state_dict=True)
         return StateDictOptions(cpu_offload=True)
 
     def load_checkpoint(self, path: Optional[str] = None):
@@ -161,6 +164,10 @@ class FSDPCheckpointManager(BaseCheckpointManager):
             print(f"[PROBE rank={self.rank}] {time.strftime('%H:%M:%S')} ckpt_mgr: before get_model_state_dict(model_only)", flush=True)
             model_state_dict = get_model_state_dict(self.model, options=state_dict_options)
             print(f"[PROBE rank={self.rank}] {time.strftime('%H:%M:%S')} ckpt_mgr: after  get_model_state_dict(model_only)", flush=True)
+            if self._extra_optimizers:
+                print(f"[PROBE rank={self.rank}] {time.strftime('%H:%M:%S')} ckpt_mgr: before _to_cpu(model_state_dict)", flush=True)
+                model_state_dict = self._to_cpu(model_state_dict)
+                print(f"[PROBE rank={self.rank}] {time.strftime('%H:%M:%S')} ckpt_mgr: after  _to_cpu(model_state_dict)", flush=True)
             print(f"[rank-{self.rank}]: Saving model to {os.path.abspath(model_path)}.")
             print(f"[PROBE rank={self.rank}] {time.strftime('%H:%M:%S')} ckpt_mgr: before torch.save(model_state_dict)", flush=True)
             torch.save(model_state_dict, model_path)
@@ -169,6 +176,10 @@ class FSDPCheckpointManager(BaseCheckpointManager):
             print(f"[PROBE rank={self.rank}] {time.strftime('%H:%M:%S')} ckpt_mgr: before get_model_state_dict", flush=True)
             model_state_dict = get_model_state_dict(self.model, options=state_dict_options)
             print(f"[PROBE rank={self.rank}] {time.strftime('%H:%M:%S')} ckpt_mgr: after  get_model_state_dict", flush=True)
+            if self._extra_optimizers:
+                print(f"[PROBE rank={self.rank}] {time.strftime('%H:%M:%S')} ckpt_mgr: before _to_cpu(model_state_dict)", flush=True)
+                model_state_dict = self._to_cpu(model_state_dict)
+                print(f"[PROBE rank={self.rank}] {time.strftime('%H:%M:%S')} ckpt_mgr: after  _to_cpu(model_state_dict)", flush=True)
             print(f"[PROBE rank={self.rank}] {time.strftime('%H:%M:%S')} ckpt_mgr: before optimizer.state_dict()", flush=True)
             optim_state_dict = [self._to_cpu(optimizer.state_dict()) for optimizer in self._optimizers]
             print(f"[PROBE rank={self.rank}] {time.strftime('%H:%M:%S')} ckpt_mgr: after  optimizer.state_dict()", flush=True)
