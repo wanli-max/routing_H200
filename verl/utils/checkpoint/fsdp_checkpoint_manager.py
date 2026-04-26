@@ -14,7 +14,6 @@
 
 import json
 import os
-import time
 from dataclasses import asdict
 from typing import Optional, Union
 
@@ -151,7 +150,6 @@ class FSDPCheckpointManager(BaseCheckpointManager):
 
     def save_checkpoint(self, path: str, save_model_only: bool = False):
         path = self.local_mkdir(path)
-        print(f"[PROBE rank={self.rank}] {time.strftime('%H:%M:%S')} ckpt_mgr: entered save_checkpoint", flush=True)
         dist.barrier()
 
         # every rank will save its own model and optim shard
@@ -161,28 +159,16 @@ class FSDPCheckpointManager(BaseCheckpointManager):
 
         state_dict_options = self._model_state_dict_options()
         if save_model_only:
-            print(f"[PROBE rank={self.rank}] {time.strftime('%H:%M:%S')} ckpt_mgr: before get_model_state_dict(model_only)", flush=True)
             model_state_dict = get_model_state_dict(self.model, options=state_dict_options)
-            print(f"[PROBE rank={self.rank}] {time.strftime('%H:%M:%S')} ckpt_mgr: after  get_model_state_dict(model_only)", flush=True)
             if self._extra_optimizers:
-                print(f"[PROBE rank={self.rank}] {time.strftime('%H:%M:%S')} ckpt_mgr: before _to_cpu(model_state_dict)", flush=True)
                 model_state_dict = self._to_cpu(model_state_dict)
-                print(f"[PROBE rank={self.rank}] {time.strftime('%H:%M:%S')} ckpt_mgr: after  _to_cpu(model_state_dict)", flush=True)
             print(f"[rank-{self.rank}]: Saving model to {os.path.abspath(model_path)}.")
-            print(f"[PROBE rank={self.rank}] {time.strftime('%H:%M:%S')} ckpt_mgr: before torch.save(model_state_dict)", flush=True)
             torch.save(model_state_dict, model_path)
-            print(f"[PROBE rank={self.rank}] {time.strftime('%H:%M:%S')} ckpt_mgr: after  torch.save(model_state_dict)", flush=True)
         else:
-            print(f"[PROBE rank={self.rank}] {time.strftime('%H:%M:%S')} ckpt_mgr: before get_model_state_dict", flush=True)
             model_state_dict = get_model_state_dict(self.model, options=state_dict_options)
-            print(f"[PROBE rank={self.rank}] {time.strftime('%H:%M:%S')} ckpt_mgr: after  get_model_state_dict", flush=True)
             if self._extra_optimizers:
-                print(f"[PROBE rank={self.rank}] {time.strftime('%H:%M:%S')} ckpt_mgr: before _to_cpu(model_state_dict)", flush=True)
                 model_state_dict = self._to_cpu(model_state_dict)
-                print(f"[PROBE rank={self.rank}] {time.strftime('%H:%M:%S')} ckpt_mgr: after  _to_cpu(model_state_dict)", flush=True)
-            print(f"[PROBE rank={self.rank}] {time.strftime('%H:%M:%S')} ckpt_mgr: before optimizer.state_dict()", flush=True)
             optim_state_dict = [self._to_cpu(optimizer.state_dict()) for optimizer in self._optimizers]
-            print(f"[PROBE rank={self.rank}] {time.strftime('%H:%M:%S')} ckpt_mgr: after  optimizer.state_dict()", flush=True)
             if len(optim_state_dict) == 1:
                 optim_state_dict = optim_state_dict[0]
             extra_state_dict = {
@@ -192,15 +178,9 @@ class FSDPCheckpointManager(BaseCheckpointManager):
             print(f"[rank-{self.rank}]: Saving model to {os.path.abspath(model_path)}.")
             print(f"[rank-{self.rank}]: Saving optimizer to {os.path.abspath(optim_path)}.")
             print(f"[rank-{self.rank}]: Saving extra_state to {os.path.abspath(extra_path)}.")
-            print(f"[PROBE rank={self.rank}] {time.strftime('%H:%M:%S')} ckpt_mgr: before torch.save(model_state_dict)", flush=True)
             torch.save(model_state_dict, model_path)
-            print(f"[PROBE rank={self.rank}] {time.strftime('%H:%M:%S')} ckpt_mgr: after  torch.save(model_state_dict)", flush=True)
-            print(f"[PROBE rank={self.rank}] {time.strftime('%H:%M:%S')} ckpt_mgr: before torch.save(optim_state_dict)", flush=True)
             torch.save(optim_state_dict, optim_path)
-            print(f"[PROBE rank={self.rank}] {time.strftime('%H:%M:%S')} ckpt_mgr: after  torch.save(optim_state_dict)", flush=True)
-            print(f"[PROBE rank={self.rank}] {time.strftime('%H:%M:%S')} ckpt_mgr: before torch.save(extra_state_dict)", flush=True)
             torch.save(extra_state_dict, extra_path)
-            print(f"[PROBE rank={self.rank}] {time.strftime('%H:%M:%S')} ckpt_mgr: after  torch.save(extra_state_dict)", flush=True)
 
         # wait for everyone to dump to local
         dist.barrier()

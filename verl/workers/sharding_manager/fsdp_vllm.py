@@ -142,13 +142,9 @@ class FSDPVLLMShardingManager(BaseShardingManager):
             # get_model_state_dict to return DTensors whose .full_tensor() call in
             # _make_weight_iterator triggers a collective that vLLM workers never join,
             # resulting in a deadlock after the first update_policy.
-            import time as _time
-            _r = dist.get_rank() if dist.is_initialized() else 0
-            print(f"[PROBE rank={_r}] {_time.strftime('%H:%M:%S')} before get_model_state_dict", flush=True)
             actor_weights = get_model_state_dict(
                 self.module, options=StateDictOptions(full_state_dict=True)
             )
-            print(f"[PROBE rank={_r}] {_time.strftime('%H:%M:%S')} after  get_model_state_dict ({len(actor_weights)} keys)", flush=True)
             actor_weights = self._rename_weight_keys(actor_weights, self.module._fsdp_wrapped_module)
             # perception_head is not part of the vLLM model; exclude it from the sync
             actor_weights = {k: v for k, v in actor_weights.items() if not k.startswith("perception_head.")}
@@ -186,28 +182,20 @@ class FSDPVLLMShardingManager(BaseShardingManager):
         #
         # pytorch: https://pytorch.org/docs/stable/notes/cuda.html#memory-management
         # vllm: https://github.com/vllm-project/vllm/blob/v0.7.3/vllm/device_allocator/cumem.py#L103
-        import time
-        _rank = dist.get_rank() if dist.is_initialized() else 0
         torch.cuda.empty_cache()
         assert self.loaded is False, "vllm engine has already been loaded"
         self.loaded = True
 
         print_gpu_memory_usage("Before vllm wake up in sharding manager")
-        print(f"[PROBE rank={_rank}] {time.strftime('%H:%M:%S')} before wake_up(weights)", flush=True)
         if "tags" in inspect.signature(self.inference_engine.wake_up).parameters:
             self.inference_engine.wake_up(tags=["weights"])
         else:
             self.inference_engine.wake_up()
-        print(f"[PROBE rank={_rank}] {time.strftime('%H:%M:%S')} after  wake_up(weights)", flush=True)
 
-        print(f"[PROBE rank={_rank}] {time.strftime('%H:%M:%S')} before _sync_weight_to_vllm", flush=True)
         self._sync_weight_to_vllm()
-        print(f"[PROBE rank={_rank}] {time.strftime('%H:%M:%S')} after  _sync_weight_to_vllm", flush=True)
 
         if "tags" in inspect.signature(self.inference_engine.wake_up).parameters:
-            print(f"[PROBE rank={_rank}] {time.strftime('%H:%M:%S')} before wake_up(kv_cache)", flush=True)
             self.inference_engine.wake_up(tags=["kv_cache"])
-            print(f"[PROBE rank={_rank}] {time.strftime('%H:%M:%S')} after  wake_up(kv_cache)", flush=True)
 
         print_gpu_memory_usage("After vllm wake up in sharding manager")
         # important: need to manually set the random states of each tp to be identical.
