@@ -660,13 +660,17 @@ class DataParallelPPOActor(BasePPOActor):
         perception_grad_norm = None
         if self.perception_optimizer is not None:
             perception_params = [p for group in self.perception_optimizer.param_groups for p in group["params"]]
-            if dist.is_initialized():
-                # perception head is not FSDP-sharded; manually sync gradients across ranks
+            if dist.is_initialized() and self.world_size > 1:
+                # perception head is not FSDP-sharded; manually sync gradients across ranks.
+                # All ranks MUST call all_reduce for the same set of params (collective op).
+                # Ranks that had no valid perception samples contribute a zero gradient so
+                # that the all_reduce is balanced and no deadlock occurs.
                 sync_params = [p for p in perception_params if getattr(p, "_is_perception_head_param", False)]
                 for p in sync_params:
-                    if p.grad is not None:
-                        dist.all_reduce(p.grad, op=dist.ReduceOp.SUM)
-                        p.grad.div_(self.world_size)
+                    if p.grad is None:
+                        p.grad = torch.zeros_like(p)  # contribute zero; keeps collective balanced
+                    dist.all_reduce(p.grad, op=dist.ReduceOp.SUM)
+                    p.grad.div_(self.world_size)
             perception_grad_norm = nn.utils.clip_grad_norm_(perception_params, max_norm=self.config.max_grad_norm)
 
         actor_grad_finite = torch.isfinite(grad_norm)
