@@ -1,7 +1,7 @@
 #!/bin/bash
 #PBS -q gpu_as
 #PBS -P gs_ccds_boan
-#PBS -l select=1:ncpus=16:ngpus=2:mem=128gb
+#PBS -l select=1:ncpus=16:ngpus=2:mem=256gb
 #PBS -l walltime=02:00:00
 #PBS -j oe
 #PBS -o /projects_vol/gp_boan/routing_H200/virl39k_smoke_2gpu_3b.log
