@@ -112,6 +112,13 @@ class FSDPCheckpointManager(BaseCheckpointManager):
             optimizer.load_state_dict(state_dict)
         return True
 
+    def _model_state_dict_options(self) -> StateDictOptions:
+        # When perception training is enabled we also enable use_orig_params=True and
+        # split parameters across multiple optimizers. In this mode, requesting the
+        # local/sharded model state has proven crash-prone during checkpoint export,
+        # while full_state_dict=True is already stable in the rollout weight-sync path.
+        return StateDictOptions(cpu_offload=True, full_state_dict=bool(self._extra_optimizers))
+
     def load_checkpoint(self, path: Optional[str] = None):
         if path is None:
             return
@@ -127,7 +134,7 @@ class FSDPCheckpointManager(BaseCheckpointManager):
         optim_state_dict = torch.load(optim_path, weights_only=False)
         extra_state_dict = torch.load(extra_path, weights_only=False)
 
-        state_dict_options = StateDictOptions(cpu_offload=True)
+        state_dict_options = self._model_state_dict_options()
         set_model_state_dict(self.model, model_state_dict, options=state_dict_options)
         if not self._load_native_optimizer_state_dicts(optim_state_dict):
             # Backward compatibility for legacy single-optimizer checkpoints that were
@@ -149,7 +156,7 @@ class FSDPCheckpointManager(BaseCheckpointManager):
         optim_path = os.path.join(path, f"optim_world_size_{self.world_size}_rank_{self.rank}.pt")
         extra_path = os.path.join(path, f"extra_state_world_size_{self.world_size}_rank_{self.rank}.pt")
 
-        state_dict_options = StateDictOptions(cpu_offload=True)
+        state_dict_options = self._model_state_dict_options()
         if save_model_only:
             print(f"[PROBE rank={self.rank}] {time.strftime('%H:%M:%S')} ckpt_mgr: before get_model_state_dict(model_only)", flush=True)
             model_state_dict = get_model_state_dict(self.model, options=state_dict_options)
