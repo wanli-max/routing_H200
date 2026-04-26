@@ -52,8 +52,6 @@ python3 -m verl.trainer.main \
     worker.rollout.gpu_memory_utilization=0.6 \
     worker.actor.model.model_path="${MODEL_PATH}" \
     worker.actor.global_batch_size=512 \
-    worker.actor.micro_batch_size_per_device_for_update=1 \
-    worker.actor.micro_batch_size_per_device_for_experience=2 \
     worker.actor.fsdp.enable_cpu_offload=true \
     worker.actor.use_answer_chain_routing=false \
     worker.actor.perception_loss_coef=0.0 \
