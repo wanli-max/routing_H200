@@ -22,7 +22,7 @@ import torch
 import torch.distributed as dist
 from peft import PeftModel, get_peft_model_state_dict
 from torch.distributed._tensor import DTensor
-from torch.distributed.checkpoint.state_dict import get_model_state_dict
+from torch.distributed.checkpoint.state_dict import StateDictOptions, get_model_state_dict
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp.fully_sharded_data_parallel import FullyShardedDataParallel as FSDP
 from transformers import PreTrainedModel
@@ -137,7 +137,14 @@ class FSDPVLLMShardingManager(BaseShardingManager):
             peft_config = self.module._fsdp_wrapped_module.peft_config.get("default", None)
             actor_weights = self._collect_lora_weights()
         else:
-            actor_weights = get_model_state_dict(self.module)
+            # full_state_dict=True forces an immediate all-gather so every rank gets
+            # plain tensors (not DTensors).  Without this, use_orig_params=True causes
+            # get_model_state_dict to return DTensors whose .full_tensor() call in
+            # _make_weight_iterator triggers a collective that vLLM workers never join,
+            # resulting in a deadlock after the first update_policy.
+            actor_weights = get_model_state_dict(
+                self.module, options=StateDictOptions(full_state_dict=True)
+            )
             actor_weights = self._rename_weight_keys(actor_weights, self.module._fsdp_wrapped_module)
             # perception_head is not part of the vLLM model; exclude it from the sync
             actor_weights = {k: v for k, v in actor_weights.items() if not k.startswith("perception_head.")}
