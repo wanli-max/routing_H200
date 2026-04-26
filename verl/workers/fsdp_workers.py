@@ -565,7 +565,6 @@ class FSDPWorker(Worker):
                 optimizer=self.optimizer,
                 lr_scheduler=self.lr_scheduler,
                 processing_class=self.processor or self.tokenizer,
-                extra_optimizers=[self.perception_optimizer] if self.perception_optimizer is not None else None,
             )
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
@@ -592,18 +591,16 @@ class FSDPWorker(Worker):
             f"[PROBE rank={self.rank}] {_probe_time.strftime('%H:%M:%S')} save_checkpoint: after  checkpoint_manager.save_checkpoint",
             flush=True,
         )
-        # perception_optimizer state is saved inside checkpoint_manager (via extra_optimizers).
-        # Only the perception lr_scheduler needs separate saving as it is not covered there.
-        if self._has_actor and self.perception_lr_scheduler is not None and not save_model_only:
-            perception_sched_path = os.path.join(path, f"perception_lr_sched_rank_{self.rank}.pt")
-            print(
-                f"[PROBE rank={self.rank}] {_probe_time.strftime('%H:%M:%S')} save_checkpoint: before torch.save(perception_lr_scheduler)",
-                flush=True,
-            )
-            torch.save(self.perception_lr_scheduler.state_dict(), perception_sched_path)
-            print(
-                f"[PROBE rank={self.rank}] {_probe_time.strftime('%H:%M:%S')} save_checkpoint: after  torch.save(perception_lr_scheduler)",
-                flush=True,
+        if self._has_actor and self.perception_optimizer is not None and not save_model_only:
+            perception_state_path = os.path.join(path, f"perception_state_rank_{self.rank}.pt")
+            torch.save(
+                {
+                    "perception_optimizer": self.perception_optimizer.state_dict(),
+                    "perception_lr_scheduler": None
+                    if self.perception_lr_scheduler is None
+                    else self.perception_lr_scheduler.state_dict(),
+                },
+                perception_state_path,
             )
         dist.barrier()
         if self._use_param_offload:
@@ -624,14 +621,16 @@ class FSDPWorker(Worker):
             load_fsdp_model(self.fsdp_module)
 
         self.checkpoint_manager.load_checkpoint(path)
-        # perception_optimizer state is restored inside checkpoint_manager (via extra_optimizers).
-        # Only the perception lr_scheduler needs separate loading.
-        if self._has_actor and self.perception_lr_scheduler is not None:
-            perception_sched_path = os.path.join(path, f"perception_lr_sched_rank_{self.rank}.pt")
-            if os.path.exists(perception_sched_path):
-                self.perception_lr_scheduler.load_state_dict(
-                    torch.load(perception_sched_path, weights_only=False)
-                )
+        if self._has_actor and self.perception_optimizer is not None:
+            perception_state_path = os.path.join(path, f"perception_state_rank_{self.rank}.pt")
+            if os.path.exists(perception_state_path):
+                perception_state = torch.load(perception_state_path, weights_only=False)
+                self.perception_optimizer.load_state_dict(perception_state["perception_optimizer"])
+                if (
+                    self.perception_lr_scheduler is not None
+                    and perception_state.get("perception_lr_scheduler") is not None
+                ):
+                    self.perception_lr_scheduler.load_state_dict(perception_state["perception_lr_scheduler"])
         dist.barrier()
         if self._use_param_offload:
             offload_fsdp_model(self.fsdp_module)
