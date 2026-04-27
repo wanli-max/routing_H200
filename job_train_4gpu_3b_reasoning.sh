@@ -37,7 +37,7 @@ echo "  Model      : ${MODEL_PATH}"
 echo "  Data       : ${DATASET_ROOT}"
 echo "============================================"
 
-RESUME_CKPT=${3:-""}
+RESUME_CKPT=${RESUME_CKPT:-""}
 
 python3 -m verl.trainer.main \
     config=examples/config.yaml \
