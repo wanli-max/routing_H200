@@ -116,6 +116,22 @@ def finalize_dataset(dataset: Dataset, features: Features, split_name: str) -> D
 
 # ── local dataset loader ──────────────────────────────────────────────────────
 
+def _disable_image_decoding(ds: Dataset) -> Dataset:
+    """Cast all Image columns to Image(decode=False).
+
+    When a parquet file stores images as {"bytes": ..., "path": "foo.jpg"},
+    HuggingFace datasets will try to open the path as a local file when
+    iterating rows.  Setting decode=False returns the raw dict instead,
+    which our _convert functions handle correctly via normalize_images().
+    """
+    from datasets import Image as HFImage, Sequence as HFSequence
+    for col, feature in ds.features.items():
+        if isinstance(feature, HFImage):
+            ds = ds.cast_column(col, HFImage(decode=False))
+        elif isinstance(feature, HFSequence) and isinstance(feature.feature, HFImage):
+            ds = ds.cast_column(col, HFSequence(HFImage(decode=False)))
+    return ds
+
 def _load_local(path: str, label: str, split_prefix: Optional[str] = None) -> Dataset:
     """Load a dataset from a local directory.
 
@@ -145,7 +161,8 @@ def _load_local(path: str, label: str, split_prefix: Optional[str] = None) -> Da
 
     if parquet_files:
         print(f"      Loading {len(parquet_files)} parquet file(s) from {p}")
-        return load_dataset("parquet", data_files=parquet_files, split="train")
+        ds = load_dataset("parquet", data_files=parquet_files, split="train")
+        return _disable_image_decoding(ds)
 
     # Fall back to Arrow / save_to_disk layout
     dataset_info = p / "dataset_info.json"
@@ -157,8 +174,8 @@ def _load_local(path: str, label: str, split_prefix: Optional[str] = None) -> Da
         if hasattr(ds, "keys"):
             split_name = next(iter(ds.keys()))
             print(f"      Using split '{split_name}' from DatasetDict")
-            return ds[split_name]
-        return ds
+            ds = ds[split_name]
+        return _disable_image_decoding(ds)
 
     raise FileNotFoundError(
         f"{label}: no *.parquet files and no dataset_info.json found under {p}. "
