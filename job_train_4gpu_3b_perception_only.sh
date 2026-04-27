@@ -52,7 +52,7 @@ python3 -m verl.trainer.main \
     worker.actor.model.model_path="${MODEL_PATH}" \
     worker.actor.global_batch_size=512 \
     worker.actor.use_answer_chain_routing=false \
-    worker.actor.perception_loss_coef=0.1 \
+    worker.actor.perception_loss_coef=0.01 \
     worker.actor.perception_success_threshold=0.5 \
     trainer.total_epochs=2 \
     trainer.experiment_name="${EXPERIMENT_NAME}" \
