@@ -116,18 +116,33 @@ def finalize_dataset(dataset: Dataset, features: Features, split_name: str) -> D
 
 # ── local dataset loader ──────────────────────────────────────────────────────
 
-def _load_local(path: str, label: str) -> Dataset:
+def _load_local(path: str, label: str, split_prefix: Optional[str] = None) -> Dataset:
     """Load a dataset from a local directory.
 
     Supports two layouts:
     1. Directory containing *.parquet files (e.g. downloaded from HF Hub).
     2. Directory saved with dataset.save_to_disk() (Arrow format).
+
+    Args:
+        split_prefix: If set, only load parquet files whose name starts with
+                      this prefix (e.g. "test-" to select test-*.parquet when
+                      train-*.parquet files are present in the same directory).
     """
     p = Path(path)
     if not p.is_dir():
         raise FileNotFoundError(f"{label}: path is not a directory: {p}")
 
-    parquet_files = sorted(_glob.glob(str(p / "*.parquet")))
+    all_parquet = sorted(_glob.glob(str(p / "*.parquet")))
+    if split_prefix:
+        parquet_files = [f for f in all_parquet if Path(f).name.startswith(split_prefix)]
+        if not parquet_files and all_parquet:
+            raise FileNotFoundError(
+                f"{label}: no parquet files starting with '{split_prefix}' in {p}. "
+                f"Available files: {[Path(f).name for f in all_parquet]}"
+            )
+    else:
+        parquet_files = all_parquet
+
     if parquet_files:
         print(f"      Loading {len(parquet_files)} parquet file(s) from {p}")
         return load_dataset("parquet", data_files=parquet_files, split="train")
@@ -200,7 +215,7 @@ def adapt_virl39k_train(hf_cache: Optional[str], local_path: Optional[str] = Non
 def adapt_mmk12_val(hf_cache: Optional[str], wrap_unboxed: bool, local_path: Optional[str] = None) -> Dataset:
     if local_path:
         print(f"[2/2] Loading MMK12 from local path: {local_path}")
-        raw = _load_local(local_path, "MMK12")
+        raw = _load_local(local_path, "MMK12", split_prefix="test-")
     else:
         print(f"[2/2] Downloading {MMK12_HF_ID} (test split) ...")
         kwargs = {"cache_dir": hf_cache} if hf_cache else {}
