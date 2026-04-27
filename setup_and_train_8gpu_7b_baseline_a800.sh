@@ -22,7 +22,6 @@ MMK12_PATH="/data/raw/MMK12/test"      # local MMK12 parquet directory
 
 MODEL_PATH="Qwen/Qwen2.5-VL-7B-Instruct"  # HF model ID or local path
 
-CONDA_ENV="easyr1_virl39k_jh"
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ── derived paths (relative to repo root) ────────────────────────────────────
@@ -44,11 +43,6 @@ echo "============================================"
 
 cd "${REPO_ROOT}"
 git pull
-
-# ── conda ─────────────────────────────────────────────────────────────────────
-module load anaconda 2>/dev/null || true
-source "$(conda info --base)/etc/profile.d/conda.sh"
-conda activate "${CONDA_ENV}"
 
 # ── preprocess dataset ────────────────────────────────────────────────────────
 if [[ -f "${DATASET_ROOT}/train/part-00000.parquet" && \
