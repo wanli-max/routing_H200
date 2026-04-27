@@ -75,7 +75,7 @@ python3 -m verl.trainer.main \
     worker.actor.model.model_path="${MODEL_PATH}" \
     worker.actor.global_batch_size=4 \
     worker.actor.use_answer_chain_routing=false \
-    worker.actor.perception_loss_coef=0.01 \
+    worker.actor.perception_loss_coef=0.005 \
     worker.actor.perception_success_threshold=0.5 \
     worker.rollout.tensor_parallel_size=1 \
     worker.rollout.gpu_memory_utilization=0.35 \
