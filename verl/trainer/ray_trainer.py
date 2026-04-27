@@ -651,6 +651,15 @@ class RayPPOTrainer:
                         # get token level scores asynchronously
                         reward_tensor, reward_metrics = ray.get(reward_ref)
                         batch.batch["token_level_scores"] = reward_tensor
+                        # Store per-sample accuracy for perception success gate.
+                        # Uses the raw accuracy sub-metric (0/1 or -1/1) rather than
+                        # overall score, so the gate is format-agnostic:
+                        # threshold=0.5 passes correct answers regardless of format,
+                        # fails wrong answers regardless of format.
+                        if "accuracy" in reward_metrics:
+                            batch.batch["sequence_accuracy"] = torch.tensor(
+                                reward_metrics["accuracy"], dtype=torch.float32
+                            )
                         reward_metrics = {f"reward/{k}": v for k, v in reduce_metrics(reward_metrics).items()}
                         metrics.update(reward_metrics)
 
