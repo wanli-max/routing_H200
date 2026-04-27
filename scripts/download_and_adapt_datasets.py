@@ -1,12 +1,23 @@
 #!/usr/bin/env python3
 """
-Download ViRL39K + MMK12 from HuggingFace and adapt them into EasyR1 format.
+Download (or adapt from local files) ViRL39K + MMK12 into EasyR1 format.
 
-Usage:
+Usage — from HuggingFace (requires internet):
     python3 scripts/download_and_adapt_datasets.py \
         --output-root /path/to/output/virl39k_mmk12_easyr1 \
         [--hf-cache /path/to/hf/cache] \
         [--overwrite]
+
+Usage — from local parquet files (offline):
+    python3 scripts/download_and_adapt_datasets.py \
+        --virl39k-path /data/ViRL39K/train \
+        --mmk12-path   /data/MMK12/test \
+        --output-root  ./datasets/virl39k_mmk12_easyr1 \
+        [--overwrite]
+
+  --virl39k-path / --mmk12-path accept either:
+    • A directory containing *.parquet files, or
+    • A directory saved with dataset.save_to_disk() (Arrow format).
 
 Output structure:
     <output-root>/
@@ -22,6 +33,7 @@ Then set in your job script:
 """
 
 import argparse
+import glob as _glob
 import os
 from collections import Counter
 from pathlib import Path
@@ -102,13 +114,54 @@ def finalize_dataset(dataset: Dataset, features: Features, split_name: str) -> D
     return dataset.cast(features)
 
 
+# ── local dataset loader ──────────────────────────────────────────────────────
+
+def _load_local(path: str, label: str) -> Dataset:
+    """Load a dataset from a local directory.
+
+    Supports two layouts:
+    1. Directory containing *.parquet files (e.g. downloaded from HF Hub).
+    2. Directory saved with dataset.save_to_disk() (Arrow format).
+    """
+    p = Path(path)
+    if not p.is_dir():
+        raise FileNotFoundError(f"{label}: path is not a directory: {p}")
+
+    parquet_files = sorted(_glob.glob(str(p / "*.parquet")))
+    if parquet_files:
+        print(f"      Loading {len(parquet_files)} parquet file(s) from {p}")
+        return load_dataset("parquet", data_files=parquet_files, split="train")
+
+    # Fall back to Arrow / save_to_disk layout
+    dataset_info = p / "dataset_info.json"
+    if dataset_info.exists():
+        from datasets import load_from_disk
+        print(f"      Loading Arrow dataset from {p}")
+        ds = load_from_disk(str(p))
+        # load_from_disk may return a DatasetDict; take the first split
+        if hasattr(ds, "keys"):
+            split_name = next(iter(ds.keys()))
+            print(f"      Using split '{split_name}' from DatasetDict")
+            return ds[split_name]
+        return ds
+
+    raise FileNotFoundError(
+        f"{label}: no *.parquet files and no dataset_info.json found under {p}. "
+        "Expected either parquet files or a dataset saved with save_to_disk()."
+    )
+
+
 # ── ViRL39K ───────────────────────────────────────────────────────────────────
 
-def adapt_virl39k_train(hf_cache: Optional[str]) -> Dataset:
-    print(f"[1/2] Downloading {VIRL39K_HF_ID} ...")
-    kwargs = {"cache_dir": hf_cache} if hf_cache else {}
-    raw = load_dataset(VIRL39K_HF_ID, split="train", **kwargs)
-    print(f"      {len(raw)} rows downloaded.")
+def adapt_virl39k_train(hf_cache: Optional[str], local_path: Optional[str] = None) -> Dataset:
+    if local_path:
+        print(f"[1/2] Loading ViRL39K from local path: {local_path}")
+        raw = _load_local(local_path, "ViRL39K")
+    else:
+        print(f"[1/2] Downloading {VIRL39K_HF_ID} ...")
+        kwargs = {"cache_dir": hf_cache} if hf_cache else {}
+        raw = load_dataset(VIRL39K_HF_ID, split="train", **kwargs)
+    print(f"      {len(raw)} rows loaded.")
 
     features = build_output_features(
         include_category="category" in raw.column_names,
@@ -144,11 +197,15 @@ def adapt_virl39k_train(hf_cache: Optional[str]) -> Dataset:
 
 # ── MMK12 ─────────────────────────────────────────────────────────────────────
 
-def adapt_mmk12_val(hf_cache: Optional[str], wrap_unboxed: bool) -> Dataset:
-    print(f"[2/2] Downloading {MMK12_HF_ID} (test split) ...")
-    kwargs = {"cache_dir": hf_cache} if hf_cache else {}
-    raw = load_dataset(MMK12_HF_ID, split="test", **kwargs)
-    print(f"      {len(raw)} rows downloaded.")
+def adapt_mmk12_val(hf_cache: Optional[str], wrap_unboxed: bool, local_path: Optional[str] = None) -> Dataset:
+    if local_path:
+        print(f"[2/2] Loading MMK12 from local path: {local_path}")
+        raw = _load_local(local_path, "MMK12")
+    else:
+        print(f"[2/2] Downloading {MMK12_HF_ID} (test split) ...")
+        kwargs = {"cache_dir": hf_cache} if hf_cache else {}
+        raw = load_dataset(MMK12_HF_ID, split="test", **kwargs)
+    print(f"      {len(raw)} rows loaded.")
 
     features = build_output_features(
         include_category=("category" in raw.column_names or "subject" in raw.column_names),
@@ -180,19 +237,32 @@ def adapt_mmk12_val(hf_cache: Optional[str], wrap_unboxed: bool) -> Dataset:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Download ViRL39K + MMK12 from HuggingFace and adapt into EasyR1 format."
+        description="Adapt ViRL39K + MMK12 into EasyR1 format (from HuggingFace or local files)."
     )
     parser.add_argument("--output-root", default=DEFAULT_OUTPUT_ROOT,
                         help="Output root directory.")
+    # ── HuggingFace mode ──────────────────────────────────────────────────────
     parser.add_argument("--hf-cache", default=None,
-                        help="HuggingFace cache directory (optional, defaults to ~/.cache/huggingface).")
+                        help="HuggingFace cache directory. When set, load from local HF cache "
+                             "instead of downloading. Ignored if --virl39k-path is provided.")
+    # ── Local file mode ───────────────────────────────────────────────────────
+    parser.add_argument("--virl39k-path", default=None,
+                        help="Path to local ViRL39K dataset directory (parquet files or "
+                             "save_to_disk Arrow format). Overrides HuggingFace download.")
+    parser.add_argument("--mmk12-path", default=None,
+                        help="Path to local MMK12 dataset directory (parquet files or "
+                             "save_to_disk Arrow format). Overrides HuggingFace download.")
+    # ── misc ──────────────────────────────────────────────────────────────────
     parser.add_argument("--wrap-unboxed-val-answers", action="store_true",
                         help="Wrap MMK12 answers in \\boxed{} if not already boxed.")
     parser.add_argument("--overwrite", action="store_true",
                         help="Overwrite existing output files.")
     args = parser.parse_args()
 
-    if args.hf_cache:
+    if (args.virl39k_path is None) != (args.mmk12_path is None):
+        parser.error("--virl39k-path and --mmk12-path must be provided together.")
+
+    if args.hf_cache and not args.virl39k_path:
         os.environ["HF_HOME"] = args.hf_cache
 
     output_root = Path(args.output_root)
@@ -203,8 +273,8 @@ def main() -> None:
         if path.exists() and not args.overwrite:
             raise FileExistsError(f"Output already exists: {path}  (use --overwrite to replace)")
 
-    train_ds = adapt_virl39k_train(args.hf_cache)
-    val_ds   = adapt_mmk12_val(args.hf_cache, args.wrap_unboxed_val_answers)
+    train_ds = adapt_virl39k_train(args.hf_cache, local_path=args.virl39k_path)
+    val_ds   = adapt_mmk12_val(args.hf_cache, args.wrap_unboxed_val_answers, local_path=args.mmk12_path)
 
     train_out.parent.mkdir(parents=True, exist_ok=True)
     val_out.parent.mkdir(parents=True, exist_ok=True)
