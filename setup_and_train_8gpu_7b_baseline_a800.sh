@@ -17,8 +17,8 @@
 set -euo pipefail
 
 # ── [EDIT THESE] ─────────────────────────────────────────────────────────────
-VIRL39K_PATH="/data/raw/ViRL39K/train" # local ViRL39K parquet directory
-MMK12_PATH="/data/raw/MMK12/test"      # local MMK12 parquet directory
+VIRL39K_DIR="/data/raw/ViRL39K"        # directory containing 39Krelease.parquet + images/
+MMK12_DIR="/data/raw/MMK12/data"       # directory containing test-*.parquet
 
 MODEL_PATH="Qwen/Qwen2.5-VL-7B-Instruct"  # HF model ID or local path
 
@@ -51,10 +51,11 @@ if [[ -f "${DATASET_ROOT}/train/part-00000.parquet" && \
     echo "      (delete the directory and re-run to force reprocessing)"
 else
     echo "[1/2] Preprocessing datasets ..."
-    python3 scripts/download_and_adapt_datasets.py \
-        --virl39k-path "${VIRL39K_PATH}" \
-        --mmk12-path   "${MMK12_PATH}" \
-        --output-root  "${DATASET_ROOT}"
+    python3 scripts/adapt_virl39k_mmk12.py \
+        --train-dir    "${VIRL39K_DIR}" \
+        --val-dir      "${MMK12_DIR}" \
+        --output-root  "${DATASET_ROOT}" \
+        --overwrite
 fi
 
 # ── train ─────────────────────────────────────────────────────────────────────
