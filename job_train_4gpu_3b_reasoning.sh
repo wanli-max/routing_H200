@@ -37,6 +37,8 @@ echo "  Model      : ${MODEL_PATH}"
 echo "  Data       : ${DATASET_ROOT}"
 echo "============================================"
 
+RESUME_CKPT=${3:-""}
+
 python3 -m verl.trainer.main \
     config=examples/config.yaml \
     data.train_files="${DATASET_ROOT}/train" \
@@ -58,6 +60,7 @@ python3 -m verl.trainer.main \
     trainer.experiment_name="${EXPERIMENT_NAME}" \
     trainer.n_gpus_per_node=4 \
     trainer.logger='["file","tensorboard"]' \
+    ${RESUME_CKPT:+trainer.load_checkpoint_path="${RESUME_CKPT}"} \
     2>&1 | tee "${EXPERIMENT_NAME}.log"
 
 echo "[FINISH] Training completed: ${EXPERIMENT_NAME}"
