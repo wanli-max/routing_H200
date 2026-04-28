@@ -52,9 +52,9 @@ python3 -m verl.trainer.main \
     worker.actor.model.model_path="${MODEL_PATH}" \
     worker.actor.global_batch_size=512 \
     worker.actor.use_answer_chain_routing=false \
-    worker.actor.perception_loss_coef=0.005 \
+    worker.actor.perception_loss_coef=0.0075 \
     worker.actor.perception_success_threshold=0.5 \
-    trainer.total_epochs=2 \
+    trainer.total_epochs=1 \
     trainer.experiment_name="${EXPERIMENT_NAME}" \
     trainer.n_gpus_per_node=4 \
     trainer.logger='["file","tensorboard"]' \
