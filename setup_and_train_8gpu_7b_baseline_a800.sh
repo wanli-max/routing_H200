@@ -52,10 +52,14 @@ if [[ -f "${DATASET_ROOT}/train/part-00000.parquet" && \
 else
     echo "[1/2] Preprocessing datasets ..."
     python3 scripts/adapt_virl39k_mmk12.py \
-        --train-dir    "${VIRL39K_DIR}" \
-        --val-dir      "${MMK12_DIR}" \
-        --output-root  "${DATASET_ROOT}" \
-        --overwrite
+        --train-dir         "${VIRL39K_DIR}" \
+        --val-dir           "${MMK12_DIR}" \
+        --output-root       "${DATASET_ROOT}" \
+        --overwrite \
+        --model-path        "${MODEL_PATH}" \
+        --max-prompt-length 2048 \
+        --max-pixels        1048576 \
+        --filter-workers    16
 fi
 
 # ── train ─────────────────────────────────────────────────────────────────────
