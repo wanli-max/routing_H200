@@ -52,6 +52,7 @@ python3 -m verl.trainer.main \
     worker.actor.model.model_path="${MODEL_PATH}" \
     worker.actor.global_batch_size=512 \
     worker.actor.use_answer_chain_routing=false \
+    worker.actor.answer_chain_local_window_size=64 \
     worker.actor.perception_loss_coef=0.0075 \
     worker.actor.perception_success_threshold=0.5 \
     trainer.total_epochs=1 \

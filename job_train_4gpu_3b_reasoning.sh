@@ -58,7 +58,7 @@ python3 -m verl.trainer.main \
     worker.actor.clip_ratio_dual=3.0 \
     worker.actor.reasoning_loss_weight_clip_min=null \
     worker.actor.reasoning_loss_weight_clip_max=null \
-    worker.actor.answer_chain_local_window_size=128 \
+    worker.actor.answer_chain_local_window_size=64 \
     trainer.total_epochs=1 \
     trainer.experiment_name="${EXPERIMENT_NAME}" \
     trainer.n_gpus_per_node=4 \
