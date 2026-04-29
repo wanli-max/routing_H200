@@ -126,6 +126,8 @@ class ActorConfig:
     """enable torch compile"""
     use_answer_chain_routing: bool = True
     """enable answer-chain routing to reweight reasoning token PPO loss; False = original EasyR1 behaviour"""
+    answer_chain_local_window_size: int = 64
+    """causal local window size for answer-chain predecessor attention; larger covers more of the reasoning chain"""
     tau_positive: float = 1.0
     """temperature for positive tokens"""
     tau_negative: float = 1.05
