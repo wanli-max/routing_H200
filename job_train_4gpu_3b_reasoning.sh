@@ -50,7 +50,7 @@ python3 -m verl.trainer.main \
     data.rollout_batch_size=512 \
     data.val_batch_size=512 \
     worker.rollout.max_num_batched_tokens=16384 \
-    worker.rollout.gpu_memory_utilization=0.6 \
+    worker.rollout.gpu_memory_utilization=0.5 \
     worker.actor.model.model_path="${MODEL_PATH}" \
     worker.actor.global_batch_size=512 \
     worker.actor.clip_ratio_high=null \
