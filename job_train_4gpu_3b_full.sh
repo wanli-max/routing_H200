@@ -50,7 +50,7 @@ python3 -m verl.trainer.main \
     worker.rollout.gpu_memory_utilization=0.6 \
     worker.actor.model.model_path="${MODEL_PATH}" \
     worker.actor.global_batch_size=512 \
-    worker.actor.answer_chain_local_window_size=64 \
+    worker.actor.answer_chain_local_window_size=128 \
     worker.actor.perception_loss_coef=0.1 \
     trainer.total_epochs=2 \
     trainer.experiment_name="${EXPERIMENT_NAME}" \
