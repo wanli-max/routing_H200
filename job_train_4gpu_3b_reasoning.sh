@@ -50,11 +50,10 @@ python3 -m verl.trainer.main \
     data.rollout_batch_size=512 \
     data.val_batch_size=512 \
     worker.rollout.max_num_batched_tokens=16384 \
-    worker.rollout.gpu_memory_utilization=0.5 \
+    worker.rollout.gpu_memory_utilization=0.6 \
     worker.actor.model.model_path="${MODEL_PATH}" \
     worker.actor.global_batch_size=512 \
     worker.actor.clip_ratio_high=null \
-    worker.actor.answer_chain_local_window_size=128 \
     trainer.total_epochs=1 \
     trainer.experiment_name="${EXPERIMENT_NAME}" \
     trainer.n_gpus_per_node=4 \
