@@ -789,9 +789,6 @@ class DataParallelPPOActor(BasePPOActor):
             else:
                 visual_target = None
 
-        # Release cached routing tensors so vLLM can reclaim memory on next wake_up
-        torch.cuda.empty_cache()
-
         output_tensors = {"old_log_probs": log_probs}
         if token_loss_weights is not None and answer_chain_valid_mask is not None:
             output_tensors["token_loss_weights"] = token_loss_weights
