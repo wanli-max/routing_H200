@@ -104,12 +104,12 @@ class ActorConfig:
     """number of samples per forward pass for computing log probs"""
     max_grad_norm: float = 1.0
     """number to clip grad norm"""
-    clip_ratio_low: float = 0.2
-    """clip ratio in PPO & DAPO"""
-    clip_ratio_high: float = 0.3
-    """clip ratio in PPO & DAPO"""
-    clip_ratio_dual: float = 3.0
-    """constant C in dual-clip PPO, clips when advantage < -C"""
+    clip_ratio_low: Optional[float] = 0.2
+    """lower clip ratio in PPO; None disables lower clipping"""
+    clip_ratio_high: Optional[float] = 0.3
+    """upper clip ratio in PPO/DAPO; None disables all PPO clipping (pure policy gradient)"""
+    clip_ratio_dual: Optional[float] = 3.0
+    """constant C in dual-clip PPO; None disables dual clipping"""
     loss_avg_mode: str = "token"
     """loss average mode: `token`, `seq`"""
     loss_type: str = "default"

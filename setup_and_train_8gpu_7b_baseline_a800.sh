@@ -78,6 +78,7 @@ python3 -m verl.trainer.main \
     worker.rollout.max_num_batched_tokens=16384 \
     worker.rollout.gpu_memory_utilization=0.5 \
     worker.rollout.tensor_parallel_size=2 \
+    worker.rollout.limit_images=10 \
     worker.actor.model.model_path="${MODEL_PATH}" \
     worker.actor.global_batch_size=512 \
     trainer.total_epochs=2 \

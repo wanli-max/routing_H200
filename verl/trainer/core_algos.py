@@ -21,7 +21,7 @@ implement PPO
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Optional
 
 import numpy as np
 import torch
@@ -458,9 +458,9 @@ def compute_policy_loss(
     log_probs: torch.Tensor,
     advantages: torch.Tensor,
     response_mask: torch.Tensor,
-    clip_ratio_low: float,
-    clip_ratio_high: float,
-    clip_ratio_dual: float,
+    clip_ratio_low: Optional[float],
+    clip_ratio_high: Optional[float],
+    clip_ratio_dual: Optional[float],
     tau_positive: float,
     tau_negative: float,
     loss_type: Literal["default", "gspo", "gspo_token", "cispo", "sapo"],
@@ -484,12 +484,12 @@ def compute_policy_loss(
             shape: (bs, response_length)
         response_mask: `(torch.Tensor)`
             shape: (bs, response_length)
-        clip_ratio_low: (float)
-            The lower clip range used in PPO. See https://arxiv.org/abs/1707.06347
-        clip_ratio_high: (float)
-            The higher clip range used in DAPO. See https://arxiv.org/pdf/2503.14476
-        clip_ratio_dual: (float)
-            The dual clip range used in Dual-clip PPO. See https://arxiv.org/pdf/1912.09729
+        clip_ratio_low: (Optional[float])
+            The lower clip range used in PPO. None disables lower clipping.
+        clip_ratio_high: (Optional[float])
+            The higher clip range used in DAPO. None disables all PPO clipping (pure PG).
+        clip_ratio_dual: (Optional[float])
+            The dual clip range used in Dual-clip PPO. None disables dual clipping.
         tau_positive: (float)
             The temperature for control the positive tokens' clipping in SAPO. See https://arxiv.org/pdf/2511.20347
         tau_negative: (float)
@@ -526,9 +526,16 @@ def compute_policy_loss(
     # clamp the ratio before exp to avoid nan grad
     # see: https://github.com/pytorch/pytorch/issues/10729
     ratio = torch.exp(torch.clamp(log_importance_ratio, -20.0, 20.0))
-    clipped_ratio = torch.exp(
-        torch.clamp(log_importance_ratio, np.log(1.0 - clip_ratio_low), np.log(1.0 + clip_ratio_high))
-    )
+
+    use_clip = clip_ratio_high is not None
+    if use_clip:
+        clipped_ratio = torch.exp(
+            torch.clamp(
+                log_importance_ratio,
+                np.log(1.0 - (clip_ratio_low or 0.0)),
+                np.log(1.0 + clip_ratio_high),
+            )
+        )
 
     # pg metrics
     metrics = {"ppo_kl": -negative_approx_kl}
@@ -545,14 +552,23 @@ def compute_policy_loss(
         final_pg_loss = -advantages * (positive_token_mask * gate_positive + negative_token_mask * gate_negative)
     else:
         pg_loss = -advantages * ratio  # -ratio * A
-        pg_loss2 = -advantages * clipped_ratio  # -clip(ratio, 1-clip_low, 1+clip_high) * A
-        pg_loss3 = -advantages * clip_ratio_dual  # -clip_dual * A
-
-        clipped_pg_loss_higher = torch.max(pg_loss, pg_loss2)  # clip if pg_loss < pg_loss2
-        metrics["pg_clipfrac_higher"] = (pg_loss < pg_loss2).float()
-        clipped_pg_loss_lower = torch.min(clipped_pg_loss_higher, pg_loss3)  # clip if pg_loss > pg_loss3 and adv < 0
-        final_pg_loss = torch.where(advantages < 0, clipped_pg_loss_lower, clipped_pg_loss_higher)
-        metrics["pg_clipfrac_lower"] = (clipped_pg_loss_higher > pg_loss3).float() * (advantages < 0).float()
+        if use_clip:
+            pg_loss2 = -advantages * clipped_ratio  # -clip(ratio, 1-clip_low, 1+clip_high) * A
+            clipped_pg_loss_higher = torch.max(pg_loss, pg_loss2)
+            metrics["pg_clipfrac_higher"] = (pg_loss < pg_loss2).float()
+            if clip_ratio_dual is not None:
+                pg_loss3 = -advantages * clip_ratio_dual  # -clip_dual * A
+                clipped_pg_loss_lower = torch.min(clipped_pg_loss_higher, pg_loss3)
+                final_pg_loss = torch.where(advantages < 0, clipped_pg_loss_lower, clipped_pg_loss_higher)
+                metrics["pg_clipfrac_lower"] = (clipped_pg_loss_higher > pg_loss3).float() * (advantages < 0).float()
+            else:
+                final_pg_loss = clipped_pg_loss_higher
+                metrics["pg_clipfrac_lower"] = torch.zeros_like(pg_loss)
+        else:
+            # no clip: pure policy gradient
+            final_pg_loss = pg_loss
+            metrics["pg_clipfrac_higher"] = torch.zeros_like(pg_loss)
+            metrics["pg_clipfrac_lower"] = torch.zeros_like(pg_loss)
 
     if token_loss_weights is None:
         final_pg_loss = average_loss(final_pg_loss, response_mask, mode=loss_avg_mode)

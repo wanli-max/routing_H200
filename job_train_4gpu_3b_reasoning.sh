@@ -53,9 +53,7 @@ python3 -m verl.trainer.main \
     worker.rollout.gpu_memory_utilization=0.6 \
     worker.actor.model.model_path="${MODEL_PATH}" \
     worker.actor.global_batch_size=512 \
-    worker.actor.clip_ratio_low=1.0 \
-    worker.actor.clip_ratio_high=1000000 \
-    worker.actor.clip_ratio_dual=1000000 \
+    worker.actor.clip_ratio_high=null \
     trainer.total_epochs=1 \
     trainer.experiment_name="${EXPERIMENT_NAME}" \
     trainer.n_gpus_per_node=4 \
