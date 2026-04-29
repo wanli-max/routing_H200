@@ -132,10 +132,10 @@ class ActorConfig:
     """temperature for positive tokens"""
     tau_negative: float = 1.05
     """temperature for negative tokens"""
-    reasoning_loss_weight_clip_min: float = 0.2
-    """lower bound for clipped reasoning token weights"""
-    reasoning_loss_weight_clip_max: float = 2.0
-    """upper bound for clipped reasoning token weights"""
+    reasoning_loss_weight_clip_min: Optional[float] = 0.2
+    """lower bound for clipped reasoning token weights; None disables lower clipping"""
+    reasoning_loss_weight_clip_max: Optional[float] = 2.0
+    """upper bound for clipped reasoning token weights; None disables upper clipping"""
     perception_loss_coef: float = 0.0
     """auxiliary perception loss coefficient; 0 disables perception training"""
     perception_lr: Optional[float] = None
