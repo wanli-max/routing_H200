@@ -55,7 +55,7 @@ python3 -m verl.trainer.main \
     worker.actor.answer_chain_local_window_size=128 \
     worker.actor.perception_loss_coef=0.005 \
     worker.actor.perception_success_threshold=0.5 \
-    trainer.total_epochs=1 \
+    trainer.total_epochs=3 \
     trainer.experiment_name="${EXPERIMENT_NAME}" \
     trainer.n_gpus_per_node=4 \
     trainer.logger='["file","tensorboard"]' \
