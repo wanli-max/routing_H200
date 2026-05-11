@@ -1,12 +1,30 @@
 #!/bin/bash
+#PBS -q gpu_as
+#PBS -P gs_ccds_boan
+#PBS -l select=1:ncpus=16:ngpus=1:mem=128gb
+#PBS -l walltime=12:00:00
+#PBS -j oe
+#PBS -o /projects_vol/gp_boan/routing_H200/visualization_1gpu.log
+
 # Single-GPU launcher for response + reasoning-weight visualization.
 #
 # Usage:
-#   cd /projects_vol/gp_boan/EasyR1
+#   cd /projects_vol/gp_boan/routing_H200
 #   bash scripts/1gpu_visualization.sh
 #   bash scripts/1gpu_visualization.sh /path/to/global_step_80 [OUTPUT_DIR]
+#
+# Or submit as a PBS job, following the same pattern as job_train_*.sh:
+#   qsub scripts/1gpu_visualization.sh
 
 set -euo pipefail
+
+module load anaconda/2025
+source "$(conda info --base)/etc/profile.d/conda.sh"
+conda activate easyr1_virl39k_jh
+
+REPO_ROOT="/projects_vol/gp_boan/routing_H200"
+cd "${REPO_ROOT}"
+git pull
 
 if [[ "${CUDA_VISIBLE_DEVICES:-}" == GPU-* ]] || [[ "${CUDA_VISIBLE_DEVICES:-}" == MIG-* ]]; then
     export CUDA_VISIBLE_DEVICES=$(nvidia-smi --query-gpu=index,uuid --format=csv,noheader | \
