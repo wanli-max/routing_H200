@@ -3,6 +3,7 @@
 #
 # Usage:
 #   cd /projects_vol/gp_boan/EasyR1
+#   bash scripts/1gpu_visualization.sh
 #   bash scripts/1gpu_visualization.sh /path/to/global_step_80 [OUTPUT_DIR]
 
 set -euo pipefail
@@ -14,17 +15,13 @@ if [[ "${CUDA_VISIBLE_DEVICES:-}" == GPU-* ]] || [[ "${CUDA_VISIBLE_DEVICES:-}" 
     echo "[INFO] Converted CUDA_VISIBLE_DEVICES to: ${CUDA_VISIBLE_DEVICES}"
 fi
 
-CHECKPOINT_PATH=${1:-""}
-OUTPUT_DIR=${2:-""}
+DEFAULT_CHECKPOINT_PATH="/projects_vol/gp_boan/routing_H200/checkpoints/easy_r1/virl39k_4gpu_3b_reasoning_20260428_004314/global_step_80"
+DEFAULT_OUTPUT_DIR="/projects_vol/gp_boan/routing_H200/visualization_1gpu"
+CHECKPOINT_PATH=${1:-"${DEFAULT_CHECKPOINT_PATH}"}
+OUTPUT_DIR=${2:-"${DEFAULT_OUTPUT_DIR}"}
 MAX_SAMPLES=${MAX_SAMPLES:-3}
 GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.35}
 MAX_NEW_TOKENS=${MAX_NEW_TOKENS:-}
-
-if [[ -z "${CHECKPOINT_PATH}" ]]; then
-    echo "Usage:"
-    echo "  bash scripts/1gpu_visualization.sh CHECKPOINT_PATH [OUTPUT_DIR]"
-    exit 1
-fi
 
 if [[ "$(basename "${CHECKPOINT_PATH}")" == "actor" ]]; then
     ACTOR_DIR="${CHECKPOINT_PATH}"
@@ -53,7 +50,8 @@ echo "=================================================="
 echo "  EasyR1 Reasoning Weight Visualization - 1 GPU"
 echo "=================================================="
 echo "  Checkpoint  : ${CHECKPOINT_PATH}"
-echo "  Output dir  : ${OUTPUT_DIR:-<default beside checkpoint>}"
+echo "  Default ckpt: ${DEFAULT_CHECKPOINT_PATH}"
+echo "  Output dir  : ${OUTPUT_DIR}"
 echo "  Max samples : ${MAX_SAMPLES}"
 echo "=================================================="
 
@@ -66,9 +64,7 @@ CMD=(
   --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION}"
 )
 
-if [[ -n "${OUTPUT_DIR}" ]]; then
-  CMD+=(--output-dir "${OUTPUT_DIR}")
-fi
+CMD+=(--output-dir "${OUTPUT_DIR}")
 
 if [[ -n "${MAX_NEW_TOKENS}" ]]; then
   CMD+=(--max-new-tokens "${MAX_NEW_TOKENS}")
