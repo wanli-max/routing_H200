@@ -128,6 +128,8 @@ class ActorConfig:
     """enable answer-chain routing to reweight reasoning token PPO loss; False = original EasyR1 behaviour"""
     answer_chain_local_window_size: int = 64
     """causal local window size for answer-chain predecessor attention; larger covers more of the reasoning chain"""
+    answer_chain_head_entropy_temperature: float = 4.0
+    """temperature for entropy-based soft head weighting; higher values keep more heads active"""
     tau_positive: float = 1.0
     """temperature for positive tokens"""
     tau_negative: float = 1.05

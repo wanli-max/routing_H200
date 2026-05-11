@@ -97,6 +97,20 @@ class DataParallelPPOActor(BasePPOActor):
                 resolved_layers.append(normalized_index)
         return tuple(resolved_layers)
 
+    def _resolve_answer_chain_layer_weights(self, num_selected_layers: int) -> torch.Tensor:
+        default_weights = torch.tensor([0.5, 0.3, 0.2], dtype=torch.float32)
+        if num_selected_layers <= 0:
+            raise ValueError("num_selected_layers must be positive.")
+        if num_selected_layers == default_weights.numel():
+            return default_weights
+        if num_selected_layers < default_weights.numel():
+            truncated = default_weights[:num_selected_layers]
+            return truncated / truncated.sum().clamp_min(1e-8)
+        return torch.full((num_selected_layers,), 1.0 / num_selected_layers, dtype=torch.float32)
+
+    def _get_answer_chain_head_entropy_temperature(self) -> float:
+        return float(getattr(self.config, "answer_chain_head_entropy_temperature", 4.0))
+
     def _get_decoder_layers(self):
         candidate_modules = [self.actor_module, getattr(self.actor_module, "model", None)]
         for candidate in candidate_modules:
@@ -441,8 +455,9 @@ class DataParallelPPOActor(BasePPOActor):
 
             # Accumulate attention probabilities over layers — two batched ops per layer
             combined_probs = None
+            layer_weights = self._resolve_answer_chain_layer_weights(len(projected_layers)).to(device=device)
             routing_matmul_dtype = torch.bfloat16
-            for query_states, key_states, head_dim in projected_layers:
+            for layer_idx, (query_states, key_states, head_dim) in enumerate(projected_layers):
                 H = query_states.size(1)
                 scale = 1.0 / math.sqrt(head_dim)
 
@@ -467,13 +482,18 @@ class DataParallelPPOActor(BasePPOActor):
                     k_win.transpose(-1, -2),         # (L, H, D, W)
                 ).squeeze(2) * scale                 # (L, H, W)
 
-                # Merge, mask padding, softmax, average heads: (L, P+W)
+                # Merge, mask padding, softmax, soft head-weighting by entropy: (L, P+W)
                 logits = torch.cat([p_logits, w_logits], dim=2).to(torch.float32)
                 logits.masked_fill_(~padded_valid.unsqueeze(1), float("-inf"))
-                layer_probs = torch.softmax(logits, dim=-1).mean(dim=1).nan_to_num(0.0)  # (L, P+W)
-                combined_probs = layer_probs if combined_probs is None else combined_probs + layer_probs
-
-            combined_probs = combined_probs / len(projected_layers)        # (L, P+W)
+                head_probs = torch.softmax(logits, dim=-1).nan_to_num(0.0)  # (L, H, P+W)
+                head_entropy = -(head_probs * torch.log(head_probs.clamp_min(1e-8))).sum(dim=-1)  # (L, H)
+                head_entropy = head_entropy.mean(dim=0)  # (H,)
+                head_temperature = self._get_answer_chain_head_entropy_temperature()
+                head_weights = torch.softmax(-head_entropy / max(head_temperature, 1e-8), dim=0)  # (H,)
+                layer_probs = (head_probs * head_weights.view(1, H, 1)).sum(dim=1)  # (L, P+W)
+                layer_weight = layer_weights[layer_idx]
+                weighted_probs = layer_probs * layer_weight
+                combined_probs = weighted_probs if combined_probs is None else combined_probs + weighted_probs
 
             predecessor_indices.append(padded_abs.to(torch.long))
             predecessor_weights.append(combined_probs.to(torch.float32))
