@@ -28,8 +28,12 @@ from torch import nn
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
 from ...protocol import DataProto, batch_collate
-from ...trainer.core_algos import average_loss, build_effective_token_loss_weights, compute_kl, compute_policy_loss
-from ...utils.answer_chain_support import compute_answer_chain_support_from_local_rows
+from ...trainer.core_algos import average_loss, compute_kl, compute_policy_loss
+from ...utils.answer_chain_support import (
+    build_trivial_answer_chain_support,
+    compute_answer_chain_support_from_local_rows,
+    compute_routable_reasoning_sequence_mask,
+)
 from ...utils import torch_functional as VF
 from ...utils.py_functional import append_to_dict
 from ...utils.seqlen_balancing import prepare_dynamic_batch, restore_dynamic_batch
@@ -388,9 +392,10 @@ class DataParallelPPOActor(BasePPOActor):
         projected_layers,
         attention_mask: torch.Tensor,
         response_mask: torch.Tensor,
-    ) -> tuple[list[list[torch.Tensor]], list[list[torch.Tensor]]]:
-        predecessor_indices: list[list[torch.Tensor]] = []
-        predecessor_weights: list[list[torch.Tensor]] = []
+    ) -> tuple[list[torch.Tensor], list[torch.Tensor], list[torch.Tensor]]:
+        predecessor_indices: list[torch.Tensor] = []
+        predecessor_weights: list[torch.Tensor] = []
+        predecessor_valid_masks: list[torch.Tensor] = []
         window_size = self._get_answer_chain_window_size()
         device = attention_mask.device
 
@@ -407,8 +412,10 @@ class DataParallelPPOActor(BasePPOActor):
             W = window_size
 
             if L == 0:
-                predecessor_indices.append([])
-                predecessor_weights.append([])
+                empty_shape = (0, P + W)
+                predecessor_indices.append(torch.empty(empty_shape, device=device, dtype=torch.long))
+                predecessor_weights.append(torch.empty(empty_shape, device=device, dtype=torch.float32))
+                predecessor_valid_masks.append(torch.empty(empty_shape, device=device, dtype=torch.bool))
                 continue
 
             # Causal local window offsets (0-indexed within response)
@@ -468,18 +475,11 @@ class DataParallelPPOActor(BasePPOActor):
 
             combined_probs = combined_probs / len(projected_layers)        # (L, P+W)
 
-            # Unpack padded tensors into variable-length lists (pure indexing, no GPU compute)
-            sample_indices: list[torch.Tensor] = []
-            sample_weights: list[torch.Tensor] = []
-            for i in range(L):
-                valid = padded_valid[i]
-                sample_indices.append(padded_abs[i][valid])
-                sample_weights.append(combined_probs[i][valid].to(torch.float32))
+            predecessor_indices.append(padded_abs.to(torch.long))
+            predecessor_weights.append(combined_probs.to(torch.float32))
+            predecessor_valid_masks.append(padded_valid)
 
-            predecessor_indices.append(sample_indices)
-            predecessor_weights.append(sample_weights)
-
-        return predecessor_indices, predecessor_weights
+        return predecessor_indices, predecessor_weights, predecessor_valid_masks
 
     def _compute_answer_chain_support_from_cached_projected_states(
         self,
@@ -488,23 +488,26 @@ class DataParallelPPOActor(BasePPOActor):
         answer_token_mask: torch.Tensor,
         cached_projected_states: torch.Tensor,
         input_ids: Optional[torch.Tensor] = None,
+        produce_visual_target: bool = True,
     ):
         projected_layers = self._unpack_cached_projected_query_key_states(cached_projected_states)
-        predecessor_indices, predecessor_weights = self._build_local_predecessor_rows(
+        predecessor_indices, predecessor_weights, predecessor_valid_masks = self._build_local_predecessor_rows(
             projected_layers=projected_layers,
             attention_mask=attention_mask,
             response_mask=response_mask,
         )
         visual_token_mask = None
-        if input_ids is not None:
+        if produce_visual_target and input_ids is not None:
             visual_token_mask = self._build_visual_token_mask(input_ids=input_ids, attention_mask=attention_mask)
         return compute_answer_chain_support_from_local_rows(
             predecessor_indices=predecessor_indices,
             predecessor_weights=predecessor_weights,
+            predecessor_valid_masks=predecessor_valid_masks,
             attention_mask=attention_mask,
             response_mask=response_mask,
             answer_token_mask=answer_token_mask,
             visual_token_mask=visual_token_mask,
+            produce_visual_target=produce_visual_target,
         )
 
     def _forward_micro_batch(
@@ -732,34 +735,60 @@ class DataParallelPPOActor(BasePPOActor):
         visual_target_batches = []
         # Run routing when reasoning weight is needed OR when perception loss needs visual_target
         need_routing = self.config.use_answer_chain_routing or self.config.perception_loss_coef > 0
+        need_visual_target = self.config.perception_loss_coef > 0
         if self.rank == 0:
             micro_batches = tqdm(micro_batches, desc="Compute log probs", position=1)
 
         for micro_batch in micro_batches:
             model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch}
+            has_answer_token_mask = "answer_token_mask" in model_inputs
+            has_response_mask = "response_mask" in model_inputs
+            should_route_micro_batch = False
+            use_trivial_support = False
+            if need_routing and has_answer_token_mask and has_response_mask:
+                answer_token_mask = model_inputs["answer_token_mask"]
+                has_any_answer_tokens = bool((answer_token_mask > 0).any().item())
+                if not has_any_answer_tokens:
+                    use_trivial_support = True
+                else:
+                    routable_seq_mask = compute_routable_reasoning_sequence_mask(
+                        response_mask=model_inputs["response_mask"],
+                        answer_token_mask=answer_token_mask,
+                    )
+                    should_route_micro_batch = bool(routable_seq_mask.any().item())
+                    use_trivial_support = not should_route_micro_batch
+
             log_probs, cached_hidden_states, _, _ = self._forward_micro_batch(
                 model_inputs,
                 temperature=temperature,
-                cache_selected_hidden_states=need_routing,
+                cache_selected_hidden_states=should_route_micro_batch,
             )
             log_probs_lst.append(log_probs)
-            if (
-                need_routing
-                and cached_hidden_states is not None
-                and "response_mask" in model_inputs
-                and "answer_token_mask" in model_inputs
-            ):
+            if should_route_micro_batch and cached_hidden_states is not None:
                 support = self._compute_answer_chain_support_from_cached_projected_states(
                     attention_mask=model_inputs["attention_mask"],
                     response_mask=model_inputs["response_mask"],
                     answer_token_mask=model_inputs["answer_token_mask"],
                     cached_projected_states=cached_hidden_states,
                     input_ids=model_inputs.get("input_ids"),
+                    produce_visual_target=need_visual_target,
                 )
+            elif use_trivial_support:
+                support = build_trivial_answer_chain_support(
+                    attention_mask=model_inputs["attention_mask"],
+                    response_mask=model_inputs["response_mask"],
+                    answer_token_mask=model_inputs["answer_token_mask"],
+                    produce_visual_target=need_visual_target,
+                )
+            else:
+                support = None
+
+            if support is not None:
                 if self.config.use_answer_chain_routing:
                     token_loss_weight_batches.append(support.token_loss_weights)
                     answer_chain_valid_mask_batches.append(support.answer_chain_valid_mask)
-                visual_target_batches.append(support.visual_target)
+                if support.visual_target is not None:
+                    visual_target_batches.append(support.visual_target)
 
         log_probs = torch.concat(log_probs_lst, dim=0)
 
@@ -887,7 +916,7 @@ class DataParallelPPOActor(BasePPOActor):
                         perception_computed_metrics["actor/perception_loss"] = perception_loss.detach().item()
                         perception_computed_metrics["actor/perception_loss_coef"] = self.config.perception_loss_coef
 
-                    pg_loss, pg_metrics = compute_policy_loss(
+                    pg_loss, pg_metrics, effective_token_loss_weights = compute_policy_loss(
                         old_log_probs=old_log_probs,
                         log_probs=log_probs,
                         advantages=advantages,
@@ -903,6 +932,7 @@ class DataParallelPPOActor(BasePPOActor):
                         loss_avg_mode=self.config.loss_avg_mode,
                         token_loss_weight_clip_min=getattr(self.config, "reasoning_loss_weight_clip_min", None),
                         token_loss_weight_clip_max=getattr(self.config, "reasoning_loss_weight_clip_max", None),
+                        return_effective_token_weights=True,
                     )
 
                     if self.config.use_kl_loss and "ref_log_probs" in model_inputs:
@@ -936,16 +966,8 @@ class DataParallelPPOActor(BasePPOActor):
                     batch_metrics["actor/pg_loss"] = pg_loss.detach().item()
                     append_to_dict(metrics, batch_metrics)
 
-                    token_loss_weights = model_inputs.get("token_loss_weights")
-                    if token_loss_weights is not None:
-                        token_loss_weights = build_effective_token_loss_weights(
-                            token_loss_weights=token_loss_weights,
-                            response_mask=response_mask,
-                            sequence_weight_mask=model_inputs.get("answer_chain_valid_mask"),
-                            clip_min=getattr(self.config, "reasoning_loss_weight_clip_min", None),
-                            clip_max=getattr(self.config, "reasoning_loss_weight_clip_max", None),
-                            dtype=torch.float32,
-                        )
+                    if effective_token_loss_weights is not None:
+                        token_loss_weights = effective_token_loss_weights.to(torch.float32)
                         response_mask_float = response_mask.to(torch.float32)
                         masked_weights = token_loss_weights * response_mask_float
                         valid_weights = token_loss_weights[response_mask_float > 0]

@@ -469,8 +469,9 @@ def compute_policy_loss(
     sequence_weight_mask: torch.Tensor | None = None,
     token_loss_weight_clip_min: float | None = None,
     token_loss_weight_clip_max: float | None = None,
+    return_effective_token_weights: bool = False,
     **kwargs,
-) -> tuple[torch.Tensor, dict[str, float]]:
+) -> tuple[torch.Tensor, dict[str, float], torch.Tensor | None]:
     """Compute the clipped policy objective and related metrics for PPO.
 
     Adapted from https://github.com/huggingface/trl/blob/v0.15.0/trl/trainer/ppo_trainer.py#L568
@@ -501,6 +502,10 @@ def compute_policy_loss(
     Returns:
         pg_loss: `a scalar torch.Tensor`
             policy gradient loss computed via PPO
+        metrics: `(dict[str, float])`
+            aggregated PPO diagnostics
+        effective_token_weights: `(Optional[torch.Tensor])`
+            post-fallback, post-clipping token weights used by the loss when requested
         pg_clipfrac_higher: (float)
             a float number indicating the fraction of policy gradient loss being clipped to a higher value
         pg_clipfrac_lower: (float)
@@ -572,6 +577,7 @@ def compute_policy_loss(
 
     if token_loss_weights is None:
         final_pg_loss = average_loss(final_pg_loss, response_mask, mode=loss_avg_mode)
+        effective_token_weights = None
     else:
         response_mask_float = response_mask.to(final_pg_loss.dtype)
 
@@ -599,7 +605,9 @@ def compute_policy_loss(
         # Step 4: apply weights to loss.
         final_pg_loss = average_loss(final_pg_loss * effective_token_weights, response_mask, mode=loss_avg_mode)
     metrics = {k: VF.masked_mean(v, response_mask).detach().item() for k, v in metrics.items()}
-    return final_pg_loss, metrics
+    if not return_effective_token_weights:
+        effective_token_weights = None
+    return final_pg_loss, metrics, effective_token_weights
 
 
 def compute_value_loss(
