@@ -142,6 +142,8 @@ class ActorConfig:
     """auxiliary perception loss coefficient; 0 disables perception training"""
     perception_lr: Optional[float] = None
     """learning rate for visual tower + perception head; defaults to actor lr when None"""
+    perception_target_smoothing_epsilon: float = 0.1
+    """uniform smoothing strength applied to visual_target over valid visual tokens"""
     perception_success_threshold: float = 1.0
     """minimum sequence-level correctness score to apply perception loss"""
     model: ModelConfig = field(default_factory=ModelConfig)

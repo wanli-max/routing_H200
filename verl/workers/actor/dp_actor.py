@@ -111,6 +111,9 @@ class DataParallelPPOActor(BasePPOActor):
     def _get_answer_chain_head_entropy_temperature(self) -> float:
         return float(getattr(self.config, "answer_chain_head_entropy_temperature", 4.0))
 
+    def _get_perception_target_smoothing_epsilon(self) -> float:
+        return float(getattr(self.config, "perception_target_smoothing_epsilon", 0.1))
+
     def _get_decoder_layers(self):
         candidate_modules = [self.actor_module, getattr(self.actor_module, "model", None)]
         for candidate in candidate_modules:
@@ -285,6 +288,11 @@ class DataParallelPPOActor(BasePPOActor):
             visual_states = visual_token_embeds[batch_index, visual_positions]
             logits = perception_head(visual_states).to(torch.float32)
             normalized_target = current_target / (target_sum + 1e-8)
+            smoothing_epsilon = self._get_perception_target_smoothing_epsilon()
+            if smoothing_epsilon > 0:
+                smoothing_epsilon = min(max(smoothing_epsilon, 0.0), 1.0)
+                uniform_target = torch.full_like(normalized_target, 1.0 / normalized_target.numel())
+                normalized_target = (1.0 - smoothing_epsilon) * normalized_target + smoothing_epsilon * uniform_target
             losses.append(-(normalized_target * torch.log_softmax(logits, dim=-1)).sum())
             valid_mask[batch_index] = True
 
