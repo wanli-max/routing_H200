@@ -56,11 +56,8 @@ python3 -m verl.trainer.main \
     worker.rollout.limit_images=10 \
     worker.actor.model.model_path="${MODEL_PATH}" \
     worker.actor.global_batch_size=512 \
-    worker.actor.clip_ratio_low=0 \
-    worker.actor.clip_ratio_high=10.0 \
-    worker.actor.clip_ratio_dual=3.0 \
     worker.actor.reasoning_loss_weight_clip_min=0.2 \
-    worker.actor.reasoning_loss_weight_clip_max=10.0 \
+    worker.actor.reasoning_loss_weight_clip_max=5.0 \
     worker.actor.answer_chain_local_window_size=128 \
     worker.actor.perception_loss_coef=0.005 \
     worker.actor.perception_success_threshold=0.5 \
