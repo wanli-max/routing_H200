@@ -4,7 +4,7 @@
 #PBS -l select=1:ncpus=32:ngpus=4:mem=256gb
 #PBS -l walltime=48:00:00
 #PBS -j oe
-#PBS -o /projects_vol/gp_boan/routing_H200/virl39k_4gpu_3b_reasoning.log
+#PBS -o /projects_vol/gp_boan/routing_H200/3b_reasoning.log
 
 set -euo pipefail
 
@@ -26,10 +26,10 @@ git pull
 MODEL_PATH=${1:-"Qwen/Qwen2.5-VL-3B-Instruct"}
 DATASET_ROOT=${2:-"/projects_vol/gp_boan/easyr1_assets/datasets/virl39k_mmk12_easyr1"}
 RUN_TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
-EXPERIMENT_NAME="virl39k_4gpu_3b_reasoning_${RUN_TIMESTAMP}"
+EXPERIMENT_NAME="3b_reasoning_${RUN_TIMESTAMP}"
 
 echo "============================================"
-echo "  ViRL39K Training - 4x GPU (3B) Reasoning"
+echo "  Training - 3B Reasoning"
 echo "  (reasoning routing weight only, no perception loss)"
 echo "============================================"
 echo "  Experiment : ${EXPERIMENT_NAME}"
