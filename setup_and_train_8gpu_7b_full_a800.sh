@@ -59,7 +59,7 @@ python3 -m verl.trainer.main \
     worker.actor.reasoning_loss_weight_clip_min=0.2 \
     worker.actor.reasoning_loss_weight_clip_max=5.0 \
     worker.actor.answer_chain_local_window_size=128 \
-    worker.actor.perception_loss_coef=0.005 \
+    worker.actor.perception_loss_coef=0.001 \
     worker.actor.perception_success_threshold=0.8 \
     trainer.total_epochs=3 \
     trainer.experiment_name="${EXPERIMENT_NAME}" \
