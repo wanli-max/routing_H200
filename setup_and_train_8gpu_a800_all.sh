@@ -3,10 +3,10 @@
 # Train selected A800 runs sequentially on one 8-GPU node.
 #
 # Order:
-#   1. 7B full
-#   2. 3B full
-#   3. 3B reasoning only
-#   4. 3B perception only
+#   1. 3B full, 3 epochs
+#   2. 3B baseline, 2 epochs
+#   3. 7B full, 3 epochs
+#   4. 3B perception only, 3 epochs
 #
 # Launch after acquiring an 8x A800 allocation, or submit with SLURM:
 #   sbatch --nodes=1 --gres=gpu:8 --cpus-per-task=64 --mem=512G \
@@ -42,7 +42,8 @@ run_train() {
     local model_label="$1"
     local model_path="$2"
     local method="$3"
-    shift 3
+    local total_epochs="$4"
+    shift 4
 
     local experiment_name="${model_label}_${method}_${RUN_TIMESTAMP}"
     local log_path="${REPO_ROOT}/${experiment_name}.log"
@@ -51,6 +52,7 @@ run_train() {
     echo "  Launching: ${experiment_name}"
     echo "  Model    : ${model_path}"
     echo "  Method   : ${method}"
+    echo "  Epochs   : ${total_epochs}"
     echo "  Log      : ${log_path}"
     echo "============================================"
 
@@ -70,7 +72,7 @@ run_train() {
         worker.rollout.limit_images=10 \
         worker.actor.model.model_path="${model_path}" \
         worker.actor.global_batch_size=512 \
-        trainer.total_epochs=3 \
+        trainer.total_epochs="${total_epochs}" \
         trainer.experiment_name="${experiment_name}" \
         trainer.n_gpus_per_node=8 \
         trainer.logger='["file","tensorboard"]' \
@@ -81,46 +83,38 @@ run_train() {
 run_baseline() {
     local model_label="$1"
     local model_path="$2"
-    run_train "${model_label}" "${model_path}" "baseline" \
+    local total_epochs="$3"
+    run_train "${model_label}" "${model_path}" "baseline" "${total_epochs}" \
         worker.actor.use_answer_chain_routing=false \
-        worker.actor.perception_loss_coef=0.0
-}
-
-run_reasoning_only() {
-    local model_label="$1"
-    local model_path="$2"
-    run_train "${model_label}" "${model_path}" "reasoning" \
-        worker.actor.reasoning_loss_weight_clip_min=0.2 \
-        worker.actor.reasoning_loss_weight_clip_max=5.0 \
-        worker.actor.answer_chain_local_window_size=128 \
         worker.actor.perception_loss_coef=0.0
 }
 
 run_perception_only() {
     local model_label="$1"
     local model_path="$2"
-    run_train "${model_label}" "${model_path}" "perception_only" \
+    local total_epochs="$3"
+    run_train "${model_label}" "${model_path}" "perception_only" "${total_epochs}" \
         worker.actor.use_answer_chain_routing=false \
         worker.actor.answer_chain_local_window_size=128 \
-        worker.actor.perception_loss_coef=0.001 \
+        worker.actor.perception_loss_coef=0.0003 \
         worker.actor.perception_success_threshold=0.8
 }
 
 run_full() {
     local model_label="$1"
     local model_path="$2"
-    run_train "${model_label}" "${model_path}" "full" \
+    local total_epochs="$3"
+    run_train "${model_label}" "${model_path}" "full" "${total_epochs}" \
         worker.actor.reasoning_loss_weight_clip_min=0.2 \
         worker.actor.reasoning_loss_weight_clip_max=5.0 \
         worker.actor.answer_chain_local_window_size=128 \
-        worker.actor.perception_loss_coef=0.001 \
+        worker.actor.perception_loss_coef=0.0003 \
         worker.actor.perception_success_threshold=0.8
 }
 
-run_full "7b" "${MODEL_7B_PATH}"
-
-run_full "3b" "${MODEL_3B_PATH}"
-run_reasoning_only "3b" "${MODEL_3B_PATH}"
-run_perception_only "3b" "${MODEL_3B_PATH}"
+run_full "3b" "${MODEL_3B_PATH}" 3
+run_baseline "3b" "${MODEL_3B_PATH}" 2
+run_full "7b" "${MODEL_7B_PATH}" 3
+run_perception_only "3b" "${MODEL_3B_PATH}" 3
 
 echo "[FINISH] All A800 training jobs completed."

@@ -53,7 +53,7 @@ python3 -m verl.trainer.main \
     worker.actor.global_batch_size=512 \
     worker.actor.use_answer_chain_routing=false \
     worker.actor.answer_chain_local_window_size=128 \
-    worker.actor.perception_loss_coef=0.001 \
+    worker.actor.perception_loss_coef=0.0003 \
     worker.actor.perception_success_threshold=0.8 \
     trainer.total_epochs=3 \
     trainer.experiment_name="${EXPERIMENT_NAME}" \

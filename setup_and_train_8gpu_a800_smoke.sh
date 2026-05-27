@@ -95,7 +95,7 @@ run_perception_only() {
     run_train "${model_label}" "${model_path}" "perception_only" \
         worker.actor.use_answer_chain_routing=false \
         worker.actor.answer_chain_local_window_size=128 \
-        worker.actor.perception_loss_coef=0.001 \
+        worker.actor.perception_loss_coef=0.0003 \
         worker.actor.perception_success_threshold=0.8
 }
 
@@ -106,7 +106,7 @@ run_full() {
         worker.actor.reasoning_loss_weight_clip_min=0.2 \
         worker.actor.reasoning_loss_weight_clip_max=5.0 \
         worker.actor.answer_chain_local_window_size=128 \
-        worker.actor.perception_loss_coef=0.001 \
+        worker.actor.perception_loss_coef=0.0003 \
         worker.actor.perception_success_threshold=0.8
 }
 
