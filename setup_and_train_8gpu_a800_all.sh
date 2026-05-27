@@ -6,7 +6,8 @@
 #   1. 3B full, 3 epochs
 #   2. 3B baseline, 2 epochs
 #   3. 7B full, 3 epochs
-#   4. 3B perception only, 3 epochs
+#   4. 7B reasoning only, 2 epochs
+#   5. 3B perception only, 3 epochs
 #
 # Launch after acquiring an 8x A800 allocation, or submit with SLURM:
 #   sbatch --nodes=1 --gres=gpu:8 --cpus-per-task=64 --mem=512G \
@@ -89,6 +90,17 @@ run_baseline() {
         worker.actor.perception_loss_coef=0.0
 }
 
+run_reasoning_only() {
+    local model_label="$1"
+    local model_path="$2"
+    local total_epochs="$3"
+    run_train "${model_label}" "${model_path}" "reasoning" "${total_epochs}" \
+        worker.actor.reasoning_loss_weight_clip_min=0.2 \
+        worker.actor.reasoning_loss_weight_clip_max=5.0 \
+        worker.actor.answer_chain_local_window_size=128 \
+        worker.actor.perception_loss_coef=0.0
+}
+
 run_perception_only() {
     local model_label="$1"
     local model_path="$2"
@@ -115,6 +127,7 @@ run_full() {
 run_full "3b" "${MODEL_3B_PATH}" 3
 run_baseline "3b" "${MODEL_3B_PATH}" 2
 run_full "7b" "${MODEL_7B_PATH}" 3
+run_reasoning_only "7b" "${MODEL_7B_PATH}" 2
 run_perception_only "3b" "${MODEL_3B_PATH}" 3
 
 echo "[FINISH] All A800 training jobs completed."
