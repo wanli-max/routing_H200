@@ -174,11 +174,14 @@ cython_debug/
 *.pt
 
 # outputs
+.hf-datasets-cache/
+.uv-cache/
 outputs/
 checkpoints/
 wandb/
 tensorboard_log/
 
 # data
+datasets/
 images/
 images*
