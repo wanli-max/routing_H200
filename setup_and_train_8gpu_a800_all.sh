@@ -3,11 +3,9 @@
 # Train selected A800 runs sequentially on one 8-GPU node.
 #
 # Order:
-#   1. 3B full, 3 epochs
-#   2. 3B baseline, 2 epochs
-#   3. 7B full, 3 epochs
-#   4. 7B reasoning only, 2 epochs
-#   5. 3B perception only, 3 epochs
+#   1. 7B reasoning only, 2 epochs
+#   2. 3B reasoning only, 2 epochs
+#   3. 3B perception only, 3 epochs
 #
 # Launch after acquiring an 8x A800 allocation, or submit with SLURM:
 #   sbatch --nodes=1 --gres=gpu:8 --cpus-per-task=64 --mem=512G \
@@ -124,10 +122,8 @@ run_full() {
         worker.actor.perception_success_threshold=0.8
 }
 
-run_full "3b" "${MODEL_3B_PATH}" 3
-run_baseline "3b" "${MODEL_3B_PATH}" 2
-run_full "7b" "${MODEL_7B_PATH}" 3
 run_reasoning_only "7b" "${MODEL_7B_PATH}" 2
+run_reasoning_only "3b" "${MODEL_3B_PATH}" 2
 run_perception_only "3b" "${MODEL_3B_PATH}" 3
 
 echo "[FINISH] All A800 training jobs completed."
